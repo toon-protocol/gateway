@@ -136,6 +136,7 @@ Environment only; there is no config file.
 | `GATEWAY_BIND_ADDR` | `0.0.0.0` | What to listen on. |
 | `GATEWAY_RESOLVE_TIMEOUT_MS` | `3000` | How long resolution waits for anything it needs — a member's Profile off a relay, and that member's answer to `status`. Every member is asked at once, so this is the whole of what one slow member costs a tenant's first request. |
 | `TOON_SOCKS_PROXY` | — | `socks5h://<host>:<port>` for `.anyone` hosts. Validated at startup; **dialled from M5-6**. The scheme must be `socks5h`: under plain `socks5` this process would resolve the destination itself, putting a hidden service into a plaintext DNS query. |
+| `GATEWAY_DIAL_REWRITE` | `{}` | **Development only.** A JSON map from an advertised `host` or `host:port` to the `host` or `host:port` this process dials instead — a member's `connector_url` and the `access.host` it answers name the member as *its* clients reach it, and on a compose network that is not where this container reaches it. Applied at the one dial seam, so `status` and forwarding agree; rewrites no URL and no header. The sandbox's value is in `infra/sandbox/conf/workload-gateway.conf`. Empty in production, where the advertised address is the real one. |
 
 Startup collects **every** missing or malformed key and refuses with all of
 them at once:
@@ -176,6 +177,16 @@ TLS is terminated here, for **this** gateway's domain, with **this** gateway's
 certificate — which is the point: a workload is reachable over HTTPS while
 holding no certificate itself, and no provider in the Standby Set ever sees a
 certificate key.
+
+### In a container
+
+`Dockerfile` builds it: `docker build -t toon-workload-gateway .`, then the
+same environment, with the certificate pair mounted wherever
+`GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY` point. The TOON sandbox
+(`infra/sandbox`, profile `gateway`) runs it this way behind its own
+connector, with a self-signed wildcard certificate and the plain listener
+beside it, and its README walks from `make up-gateway` through publishing a
+grant to a `curl` of a workload's canonical URL.
 
 ## Its own connector
 
@@ -260,6 +271,7 @@ HTML page and the header all follow. M5-6 adds *no proxy configured*.
 | `src/status.mjs` | One `status` request: signing it, where it is sent, reading the answer. |
 | `src/forward.mjs` | Forwarding: the headers, the answer, and WebSocket upgrades. |
 | `src/dial.mjs` | The one place a TCP connection is opened — and the one host it refuses. |
+| `src/rewrite.mjs` | `GATEWAY_DIAL_REWRITE`: an advertised address dialled somewhere else, in front of that seam. |
 | `src/hostname.mjs` | The canonical label: base32, and reading a label out of a `Host`. |
 | `src/nostr.mjs` | NIP-01: serialize, id, verify, sign. |
 | `src/reasons.mjs` | The `503` vocabulary. |

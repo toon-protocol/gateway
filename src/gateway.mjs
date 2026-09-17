@@ -19,6 +19,7 @@ import { createHeldGrants } from './grants.mjs';
 import { createProfiles } from './profiles.mjs';
 import { createRelayPool, grantFilter } from './relays.mjs';
 import { createResolver } from './resolve.mjs';
+import { withDialRewrites } from './rewrite.mjs';
 import { createRequestHandler } from './serve.mjs';
 
 const listen = (server, port, address) =>
@@ -58,7 +59,7 @@ export async function startGateway({
   const resolver = createResolver({
     secretKey: config.secretKey,
     profiles,
-    dialer: createDialer({ socksProxy: config.socksProxy }),
+    dialer: withDialRewrites(createDialer({ socksProxy: config.socksProxy }), config.dialRewrites),
     now,
     log,
     timeoutMs: config.resolveTimeoutMs,
