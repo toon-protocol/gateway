@@ -11,11 +11,21 @@
 // the later `created_at`, and on a tie the lower id — so every gateway reading
 // the same relays holds the same grant whatever order the relays deliver in.
 //
-// Whether a grant is IN FORCE is not asked here: `expires_at` is checked when
-// a request arrives (`src/serve.mjs`), so an expired grant can be answered
-// with the reason that it expired rather than with the reason that no grant
-// exists, and so a grant renewed by its tenant starts serving again with no
-// restart and no timer (M5-5).
+// Whether a grant is IN FORCE is not asked here for the CANONICAL hostname:
+// `expires_at` is checked when a request arrives (`src/serve.mjs`), so an
+// expired grant can be answered with the reason that it expired rather than
+// with the reason that no grant exists, and so a grant renewed by its tenant
+// starts serving again with no restart and no timer (M5-5).
+//
+// A readable `name` is the one thing decided here and not there, because it is
+// the one thing that is not derived: two tenants may ask for `shop`, and only
+// one can have it. It is FIRST COME, FIRST SERVED among the grants this
+// gateway holds — a name is claimed when no grant still in force holds it, and
+// a later grant claiming a name in use is logged and keeps only its canonical
+// hostname. Nothing else about that grant is affected, for the same reason a
+// malformed `name` costs only the name: the canonical hostname is the one a
+// tenant can always derive, and both workloads keep it. A readable name is
+// therefore never ambiguous, and never worth racing for.
 
 import { readGrant } from './grant.mjs';
 import { canonicalLabel } from './hostname.mjs';
@@ -26,16 +36,26 @@ const supersedes = (candidate, held) =>
   (candidate.created_at === held.created_at && candidate.id < held.id);
 
 /**
- * @param {{ gatewayPubkey: string, log?: (line: string) => void }} options
+ * @param {{
+ *   gatewayPubkey: string,
+ *   now?: () => number,
+ *   log?: (line: string) => void,
+ * }} options
  */
-export function createHeldGrants({ gatewayPubkey, log = () => {} }) {
+export function createHeldGrants({
+  gatewayPubkey,
+  now = () => Math.floor(Date.now() / 1000),
+  log = () => {},
+}) {
   // The NEWEST grant seen per workload, whoever it names — including one that
   // names another gateway. Forgetting those would let an older grant, replayed
   // off a second relay, undo a tenant's rotation and put the workload back.
   /** @type {Map<string, ReturnType<typeof readGrant>>} workload id -> grant */
   const newest = new Map();
-  /** @type {Map<string, string>} hostname label -> workload id, ours only */
+  /** @type {Map<string, string>} canonical hostname label -> workload id, ours only */
   const labels = new Map();
+  /** @type {Map<string, string>} readable name -> the workload id that claimed it */
+  const names = new Map();
 
   const ours = gatewayPubkey.toLowerCase();
   const isOurs = (grant) => grant !== undefined && grant.gateway === ours;
@@ -43,6 +63,61 @@ export function createHeldGrants({ gatewayPubkey, log = () => {} }) {
   const ignore = (event, why) => {
     log(`ignored a grant${event?.id ? ` ${event.id}` : ''}: ${why}`);
     return { accepted: false, why };
+  };
+
+  /**
+   * The workload a readable name is served for, if any.
+   *
+   * A claim is checked when it is USED rather than kept on a timer: the holder
+   * may since have been rotated to another gateway, or published a grant that
+   * no longer asks for the name, and in either the name is free again with
+   * nothing to notice it.
+   *
+   * An EXPIRED grant still holds its name. That is deliberate: a tenant whose
+   * readable URL stopped working is told the grant expired, exactly as its
+   * canonical hostname says (`src/serve.mjs`), rather than that the hostname
+   * means nothing here. What expiry does cost is the claim's priority — a
+   * later grant may take the name, which is what `claimName` asks.
+   */
+  const nameHolder = (name) => {
+    const workloadId = names.get(name);
+    if (workloadId === undefined) return undefined;
+    const grant = newest.get(workloadId);
+    if (grant === undefined || !isOurs(grant) || grant.name !== name) {
+      names.delete(name);
+      return undefined;
+    }
+    return workloadId;
+  };
+
+  /** Give up every name a workload holds, because its grant no longer asks for one. */
+  const releaseNamesOf = (workloadId, keep) => {
+    for (const [name, holder] of names) {
+      if (holder === workloadId && name !== keep) names.delete(name);
+    }
+  };
+
+  /** First come, first served: claim a grant's `name`, or log why it is not served. */
+  const claimName = (grant) => {
+    releaseNamesOf(grant.workloadId, grant.name);
+    if (grant.name === undefined) return;
+    if (labels.has(grant.name) && labels.get(grant.name) !== grant.workloadId) {
+      log(
+        `grant ${grant.event.id}: the name "${grant.name}" is the canonical hostname of workload ` +
+          `${labels.get(grant.name)}; workload ${grant.workloadId} keeps its canonical hostname only`,
+      );
+      return;
+    }
+    const holder = nameHolder(grant.name);
+    if (holder !== undefined && holder !== grant.workloadId && newest.get(holder).inForceAt(now())) {
+      log(
+        `grant ${grant.event.id}: the name "${grant.name}" is already held by workload ${holder}, ` +
+          `whose grant is still in force; workload ${grant.workloadId} keeps its canonical ` +
+          'hostname only',
+      );
+      return;
+    }
+    names.set(grant.name, grant.workloadId);
   };
 
   return {
@@ -83,6 +158,7 @@ export function createHeldGrants({ gatewayPubkey, log = () => {} }) {
       // §3.1.3), so the `#p` filter of §12.1 does not carry it — M5-5 adds the
       // subscription that does, and this is what it will hand the grant to.
       if (!isOurs(grant)) {
+        releaseNamesOf(grant.workloadId);
         if (labels.delete(label)) {
           log(`workload ${grant.workloadId} was granted to another gateway; no longer served`);
         }
@@ -91,6 +167,7 @@ export function createHeldGrants({ gatewayPubkey, log = () => {} }) {
 
       labels.set(label, grant.workloadId);
       if (grant.nameProblem !== undefined) log(`grant ${grant.event.id}: ${grant.nameProblem}`);
+      claimName(grant);
       log(
         `holding a grant for workload ${grant.workloadId} at ` +
           `${label}, until ${new Date(grant.expiresAt * 1000).toISOString()}`,
@@ -100,7 +177,10 @@ export function createHeldGrants({ gatewayPubkey, log = () => {} }) {
 
     /** The grant served at one hostname label, or `undefined`. */
     find(label) {
-      const workloadId = labels.get(label);
+      // The canonical label first, ALWAYS: it is derived from the workload id,
+      // so it is the one name that cannot be taken from a workload — not even
+      // by another tenant's `name` that happens to spell the same label.
+      const workloadId = labels.get(label) ?? nameHolder(label);
       return workloadId === undefined ? undefined : newest.get(workloadId);
     },
 

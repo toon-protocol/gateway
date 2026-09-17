@@ -1,10 +1,11 @@
 // Answering a request: which workload this hostname is, and what to say when
 // it cannot be served (spec §12).
 //
-// The whole of this ticket's request path is here, and it deliberately stops
-// one step short of the workload: finding WHERE a granted workload runs, and
-// forwarding to it, is the resolver's job (M5-4), and the resolver is passed
-// in. What is decided here is what is decided the same way for every gateway:
+// This is the whole of the request path that is about the HOSTNAME, and it
+// deliberately stops one step short of the workload: finding WHERE a granted
+// workload runs, and forwarding to it, is the resolver's job
+// (`src/resolve.mjs`), and the resolver is passed in. What is decided here is
+// what is decided the same way for every gateway:
 // a hostname is one label under this gateway's domain, that label is a
 // workload this gateway holds a grant for, and the grant is in force.
 //
@@ -20,7 +21,7 @@ import { renderUnavailable, unavailable } from './reasons.mjs';
 
 /**
  * What to do with a request whose hostname names a workload this gateway holds
- * a grant for. M5-4 is what fills it in.
+ * a grant for. `src/resolve.mjs` is what fills it in.
  *
  * Returning `{ unavailable }` answers the error page. Returning ANYTHING else,
  * nothing included, means the resolver answered the request itself.
@@ -57,7 +58,13 @@ export function grantForHost(host, { domain, grants, now }) {
   return { grant };
 }
 
-/** The resolver this gateway runs with until M5-4 gives it a real one. */
+/**
+ * A resolver that finds nothing.
+ *
+ * It is what a gateway started with no resolver at all answers, and what a
+ * resolver that threw is answered as: a grant is held, and where the workload
+ * runs is not known. Never silence.
+ */
 export const notResolved = async ({ grant }) => ({
   unavailable: unavailable('not_resolved', { workloadId: grant.workloadId }),
 });
@@ -151,7 +158,7 @@ export function createRequestHandler({
       });
     },
 
-    /** A WebSocket upgrade. M5-4 passes these through to the workload. */
+    /** A WebSocket upgrade, refused or passed through to the workload. */
     handleUpgrade(req, socket, head, { secure = false } = {}) {
       return serve({ req, socket, head, secure }, (why) => {
         log(`${req.headers.host ?? '-'} UPGRADE ${req.url}: ${why.reason}`);

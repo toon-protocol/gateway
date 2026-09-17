@@ -13,7 +13,7 @@
 import { K_GATEWAY_GRANT } from './kinds.mjs';
 import { isKey32, tagValue, verifyEvent } from './nostr.mjs';
 
-/** A single DNS label: what a readable `name` may be (shape only; M5-4 serves it). */
+/** A single DNS label: what a readable `name` may be (served at §12.6; `src/grants.mjs`). */
 const isLabel = (value) =>
   typeof value === 'string' &&
   value.length >= 1 &&

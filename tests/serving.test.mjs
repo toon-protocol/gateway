@@ -201,10 +201,15 @@ describe('the error page', () => {
   });
 
   it('says a granted workload is not resolved yet, rather than saying nothing', async (t) => {
-    // The gateway with no resolver at all: M5-3 stops one step short of the
-    // workload, and a tenant must still be able to tell that from a broken
-    // gateway.
-    const gateway = await startTestGateway({ events: [grantFor()] });
+    // A resolver with a bug in it. The tenant is told a grant is held and
+    // where the workload runs is not known — never a dropped connection, and
+    // tellably different from a stopped workload.
+    const gateway = await startTestGateway({
+      events: [grantFor()],
+      resolve: async () => {
+        throw new Error('a bug in the resolver');
+      },
+    });
     t.after(() => gateway.close());
 
     const answered = await gateway.get(gateway.hostFor(WORKLOAD));

@@ -39,8 +39,10 @@ export async function startStubWorkload({ body = 'hello from the workload', stat
 
   // An application that holds a connection open, so a gateway that does not
   // pass an upgrade through is a failing test rather than a silent downgrade.
+  /** @type {WebSocketServer | null} */
+  let wss = null;
   if (websocket) {
-    const wss = new WebSocketServer({ server });
+    wss = new WebSocketServer({ server });
     wss.on('connection', (socket, req) => {
       const record = {
         url: req.url ?? '',
@@ -71,6 +73,10 @@ export async function startStubWorkload({ body = 'hello from the workload', stat
       return [...upgrades];
     },
     async close() {
+      // An upgraded socket has left the HTTP server's own connection list, so
+      // `closeAllConnections` does not end it and `close` would wait for it
+      // forever: a test that opened a WebSocket would hang in its teardown.
+      for (const client of wss?.clients ?? []) client.terminate();
       server.closeAllConnections?.();
       await new Promise((resolve) => server.close(() => resolve(undefined)));
     },

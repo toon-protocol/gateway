@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs';
 import { validateSocks5hUrl } from '@toon-protocol/client';
 
 import { publicKeyOf } from './nostr.mjs';
+import { RESOLVE_TIMEOUT_MS } from './resolve.mjs';
 
 const DEFAULT_HTTPS_PORT = 443;
 
@@ -116,6 +117,23 @@ export function readConfig(env, { readFile = (p) => readFileSync(p, 'utf8') } = 
     );
   }
 
+  // How long resolution waits for anything it needs: a member's Provider
+  // Profile off a relay, and that member's answer to `status`. It bounds a
+  // tenant's wait, because every member is asked at once — one slow member
+  // costs this and no more.
+  let resolveTimeoutMs = RESOLVE_TIMEOUT_MS;
+  if (env.GATEWAY_RESOLVE_TIMEOUT_MS !== undefined) {
+    const parsed = Number(env.GATEWAY_RESOLVE_TIMEOUT_MS);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      problems.push(
+        'GATEWAY_RESOLVE_TIMEOUT_MS is not a number of milliseconds: ' +
+          JSON.stringify(env.GATEWAY_RESOLVE_TIMEOUT_MS),
+      );
+    } else {
+      resolveTimeoutMs = parsed;
+    }
+  }
+
   // The proxy for `.anyone` hosts. Validated here so a deployment that meant
   // to hide finds out at startup; M5-6 is what dials through it.
   let socksProxy;
@@ -152,5 +170,6 @@ export function readConfig(env, { readFile = (p) => readFileSync(p, 'utf8') } = 
     httpPort,
     tls,
     socksProxy,
+    resolveTimeoutMs,
   };
 }
