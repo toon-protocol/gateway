@@ -145,6 +145,20 @@ export function createHeldGrants({
       if (current !== undefined && !supersedes(grant.event, current.event)) {
         return ignore(event, `it does not supersede the grant known for ${grant.workloadId}`);
       }
+      // ONLY THE TENANT REPLACES ITS OWN GRANT. A grant's whole authority is
+      // its signer — a provider honours one exactly when the lease's tenant
+      // signed it (spec §6.5) — so a grant signed by anybody else is not a
+      // later grant for this workload; it is another key's event with the same
+      // `d`. Taking it as a replacement would let a stranger withdraw any
+      // workload from any gateway by publishing one, now that a rotation is
+      // delivered on the workload id (spec §12.7).
+      if (current !== undefined && grant.tenant !== current.tenant) {
+        return ignore(
+          event,
+          `it is signed by ${grant.tenant}, who is not the tenant of the grant held for ` +
+            `${grant.workloadId} (${current.tenant})`,
+        );
+      }
 
       const label = canonicalLabel(grant.workloadId);
       newest.set(grant.workloadId, grant);
@@ -153,10 +167,10 @@ export function createHeldGrants({
       // gateway: the newest grant for a workload decides, and if it is not
       // ours we stop serving that workload rather than keep the old one.
       //
-      // The rule is here; what does not exist yet is a subscription that
-      // DELIVERS such a grant. It names the new gateway in its `p` tag (spec
-      // §3.1.3), so the `#p` filter of §12.1 does not carry it — M5-5 adds the
-      // subscription that does, and this is what it will hand the grant to.
+      // Such a grant names the new gateway in its `p` tag (spec §3.1.3), so the
+      // `#p` filter of §12.1 cannot carry it: what delivers it is the watch on
+      // the workload ids this gateway holds (`src/follow.mjs`, spec §12.7),
+      // which is also what stops following the workload afterwards.
       if (!isOurs(grant)) {
         releaseNamesOf(grant.workloadId);
         if (labels.delete(label)) {

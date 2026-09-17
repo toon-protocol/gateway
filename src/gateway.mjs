@@ -14,6 +14,7 @@ import { createServer as createHttpServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 
 import { createDialer } from './dial.mjs';
+import { createFollower } from './follow.mjs';
 import { K_GATEWAY_GRANT } from './kinds.mjs';
 import { createHeldGrants } from './grants.mjs';
 import { createProfiles } from './profiles.mjs';
@@ -63,6 +64,19 @@ export async function startGateway({
     log,
     timeoutMs: config.resolveTimeoutMs,
   });
+  // Following the workload: the Takeover watch, the per-cadence re-ask, and
+  // the two things that withdraw a workload (spec §12.7). Every grant event
+  // goes through it, so a rotation takes its Takeover watch with it.
+  const follower = createFollower({
+    grants,
+    profiles,
+    resolver,
+    pool: relays,
+    relays: config.relays,
+    now,
+    log,
+    tickMs: config.followTickMs,
+  });
   const handler = createRequestHandler({
     domain: config.domain,
     grants,
@@ -80,12 +94,14 @@ export async function startGateway({
   const subscription = relays.subscribe({
     relays: config.relays,
     filters: [grantFilter(config.publicKey, K_GATEWAY_GRANT)],
-    onEvent: (event) => grants.offer(event),
+    onEvent: (event) => follower.offer(event),
     onEose: (relay) => {
       log(`relay ${relay}: caught up on grants`);
       markCaughtUp();
     },
   });
+
+  follower.start();
 
   /** @type {import('node:http').Server[]} */
   const servers = [];
@@ -133,8 +149,10 @@ export async function startGateway({
     pool: relays,
     /** The Standby Set members' Profiles: connectors, Relay Sets, cadences. */
     profiles,
-    /** Resolution: `resolveNow`, `current`, `forget` — M5-5's whole seam. */
+    /** Resolution: `resolveNow`, `current`, `forget`. */
     resolver,
+    /** Following the workload: the Takeover watch and the per-cadence re-ask. */
+    follower,
     httpPort,
     httpsPort,
     /** Resolves once some relay has replayed the grants it already held. */
@@ -142,6 +160,7 @@ export async function startGateway({
 
     async stop() {
       subscription.close();
+      follower.close();
       profiles.close();
       resolver.close();
       relays.close();

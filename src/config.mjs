@@ -13,6 +13,7 @@ import { readFileSync } from 'node:fs';
 
 import { validateSocks5hUrl } from '@toon-protocol/client';
 
+import { FOLLOW_TICK_MS } from './follow.mjs';
 import { publicKeyOf } from './nostr.mjs';
 import { RESOLVE_TIMEOUT_MS } from './resolve.mjs';
 
@@ -134,6 +135,23 @@ export function readConfig(env, { readFile = (p) => readFileSync(p, 'utf8') } = 
     }
   }
 
+  // How often the gateway looks at the clock while following a workload (spec
+  // §12.7). It decides NOTHING: a settle window and a Liveness cadence are
+  // counted in the grant's and the Profile's own seconds, and this is only how
+  // late this process may be in noticing that one has passed.
+  let followTickMs = FOLLOW_TICK_MS;
+  if (env.GATEWAY_FOLLOW_TICK_MS !== undefined) {
+    const parsed = Number(env.GATEWAY_FOLLOW_TICK_MS);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      problems.push(
+        'GATEWAY_FOLLOW_TICK_MS is not a number of milliseconds: ' +
+          JSON.stringify(env.GATEWAY_FOLLOW_TICK_MS),
+      );
+    } else {
+      followTickMs = parsed;
+    }
+  }
+
   // The proxy for `.anyone` hosts. Validated here so a deployment that meant
   // to hide finds out at startup; M5-6 is what dials through it.
   let socksProxy;
@@ -171,5 +189,6 @@ export function readConfig(env, { readFile = (p) => readFileSync(p, 'utf8') } = 
     tls,
     socksProxy,
     resolveTimeoutMs,
+    followTickMs,
   };
 }
