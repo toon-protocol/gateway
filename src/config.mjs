@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs';
 import { validateSocks5hUrl } from '@toon-protocol/client';
 
 import { publicKeyOf } from './nostr.mjs';
-import { STATUS_TIMEOUT_MS } from './status.mjs';
+import { RESOLVE_TIMEOUT_MS } from './resolve.mjs';
 
 const DEFAULT_HTTPS_PORT = 443;
 
@@ -117,18 +117,20 @@ export function readConfig(env, { readFile = (p) => readFileSync(p, 'utf8') } = 
     );
   }
 
-  // How long a Standby Set member has to answer `status` before it counts as
-  // unreachable (spec \u00a76.5, \u00a712). It bounds a tenant's wait: every member is
-  // asked at once, so one slow member costs this much and no more.
-  let statusTimeoutMs = STATUS_TIMEOUT_MS;
-  if (env.GATEWAY_STATUS_TIMEOUT_MS !== undefined) {
-    const parsed = Number(env.GATEWAY_STATUS_TIMEOUT_MS);
+  // How long resolution waits for anything it needs: a member's Provider
+  // Profile off a relay, and that member's answer to `status`. It bounds a
+  // tenant's wait, because every member is asked at once — one slow member
+  // costs this and no more.
+  let resolveTimeoutMs = RESOLVE_TIMEOUT_MS;
+  if (env.GATEWAY_RESOLVE_TIMEOUT_MS !== undefined) {
+    const parsed = Number(env.GATEWAY_RESOLVE_TIMEOUT_MS);
     if (!Number.isInteger(parsed) || parsed < 1) {
       problems.push(
-        `GATEWAY_STATUS_TIMEOUT_MS is not a number of milliseconds: ${JSON.stringify(env.GATEWAY_STATUS_TIMEOUT_MS)}`,
+        'GATEWAY_RESOLVE_TIMEOUT_MS is not a number of milliseconds: ' +
+          JSON.stringify(env.GATEWAY_RESOLVE_TIMEOUT_MS),
       );
     } else {
-      statusTimeoutMs = parsed;
+      resolveTimeoutMs = parsed;
     }
   }
 
@@ -168,6 +170,6 @@ export function readConfig(env, { readFile = (p) => readFileSync(p, 'utf8') } = 
     httpPort,
     tls,
     socksProxy,
-    statusTimeoutMs,
+    resolveTimeoutMs,
   };
 }

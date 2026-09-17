@@ -61,7 +61,7 @@ export async function startGateway({
     dialer: createDialer({ socksProxy: config.socksProxy }),
     now,
     log,
-    statusTimeoutMs: config.statusTimeoutMs,
+    timeoutMs: config.resolveTimeoutMs,
   });
   const handler = createRequestHandler({
     domain: config.domain,

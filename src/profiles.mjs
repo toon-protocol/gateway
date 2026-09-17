@@ -21,9 +21,6 @@
 import { K_PROFILE } from './kinds.mjs';
 import { verifyEvent } from './nostr.mjs';
 
-/** How long resolution waits for a member's Profile to arrive off a relay. */
-export const PROFILE_WAIT_MS = 2000;
-
 /**
  * Read one event as a Provider Profile, or throw saying which field is wrong.
  *
@@ -63,9 +60,6 @@ export function readProfile(event) {
     connectorUrl,
     /** The provider's own Relay Set (spec §4), which may not be ours. */
     relays: Array.isArray(relays) ? relays.filter((r) => typeof r === 'string') : [],
-    /** `true` means the connector is at an `.anyone` address (spec §10, M5-6). */
-    hidden: content.hidden === true,
-    host: typeof content.host === 'string' ? content.host : undefined,
     /** How often this provider republishes Liveness; the unit M5-5 counts in. */
     livenessCadenceS: Number.isInteger(cadence) && cadence > 0 ? cadence : undefined,
     event,
@@ -158,7 +152,7 @@ export function createProfiles({ pool, relays, log = () => {} }) {
      * deadline. A member still missing one afterwards is a member this gateway
      * cannot reach, which is resolution's answer rather than an error here.
      */
-    async waitFor(providers, { timeoutMs = PROFILE_WAIT_MS } = {}) {
+    async waitFor(providers, { timeoutMs }) {
       const missing = providers.filter((provider) => !known.has(provider));
       if (missing.length === 0) return;
       let timer;

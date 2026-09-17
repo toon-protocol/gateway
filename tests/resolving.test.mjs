@@ -10,7 +10,8 @@ import { describe, it } from 'node:test';
 
 import { CONSTANTS, gatewayGrant, providerProfile } from './helpers/events.mjs';
 import { startTestGateway } from './helpers/harness.mjs';
-import { running, startStubConnector } from './helpers/stub-connector.mjs';
+import { refusal, running, startStubConnector } from './helpers/stub-connector.mjs';
+import { startStubRelay } from './helpers/stub-relay.mjs';
 import { startStubWorkload } from './helpers/stub-workload.mjs';
 
 const GATEWAY = CONSTANTS.gateway.public_key;
@@ -81,6 +82,38 @@ describe('when no member is running the workload', () => {
   });
 });
 
+describe('when a member tells this gateway nothing', () => {
+  it('does not call a refusal an answer about the lease', async (t) => {
+    // A grant this member will not read — expired at the provider, say. It
+    // has NOT said the workload is stopped, and saying so to the tenant would
+    // be telling it something about its lease that nobody established.
+    const { profile } = await member(t, () =>
+      refusal('bad_grant', 'that grant does not admit you here'),
+    );
+
+    const gateway = await startTestGateway({ events: [grantFor(), profile] });
+    t.after(() => gateway.close());
+
+    const answered = await gateway.get(gateway.hostFor(WORKLOAD));
+    assert.equal(answered.headers['toon-gateway-reason'], 'member_unreachable');
+    assert.match(answered.json().message, /bad_grant/);
+  });
+
+  it('cannot ask a member whose Provider Profile it has never seen', async (t) => {
+    // The grant names a member; no Profile of that member is on any relay, so
+    // there is nowhere to ask it anything.
+    const gateway = await startTestGateway({
+      events: [grantFor()],
+      env: { GATEWAY_RESOLVE_TIMEOUT_MS: '250' },
+    });
+    t.after(() => gateway.close());
+
+    const answered = await gateway.get(gateway.hostFor(WORKLOAD));
+    assert.equal(answered.headers['toon-gateway-reason'], 'member_unreachable');
+    assert.match(answered.json().message, /Profile/i);
+  });
+});
+
 describe('when the member cannot be reached', () => {
   it('says the member is unreachable when its connector never answers', async (t) => {
     const { connector, profile } = await member(t, runningAt(1));
@@ -88,7 +121,7 @@ describe('when the member cannot be reached', () => {
 
     const gateway = await startTestGateway({
       events: [grantFor(), profile],
-      env: { GATEWAY_STATUS_TIMEOUT_MS: '250' },
+      env: { GATEWAY_RESOLVE_TIMEOUT_MS: '250' },
     });
     t.after(() => gateway.close());
 
@@ -216,5 +249,47 @@ describe('a readable name', () => {
     t.after(() => gateway.close());
 
     assert.equal((await gateway.get(gateway.hostFor(WORKLOAD))).status, 200);
+  });
+});
+
+describe('a member\'s own Relay Set', () => {
+  it('is read from its Profile and watched, so a Profile this gateway never had reaches it', async (t) => {
+    const workload = await startStubWorkload({ body: 'the application answered' });
+    t.after(() => workload.close());
+
+    // The member moved its connector. The Profile that says where to is on
+    // the member's OWN Relay Set, which this gateway is not configured with —
+    // all it is configured with is a relay carrying the older Profile that
+    // names those relays (spec §4, §12.4).
+    const moved = await startStubConnector({
+      pubkey: MEMBER.public_key,
+      answer: runningAt(workload.port),
+    });
+    t.after(() => moved.close());
+
+    const theirs = await startStubRelay({});
+    t.after(() => theirs.close());
+    theirs.publish(
+      providerProfile({
+        providerSecret: MEMBER.secret_key,
+        connectorUrl: moved.url,
+        relays: [theirs.url],
+        createdAt: CONSTANTS.now + 10,
+      }),
+    );
+
+    const stale = await startStubConnector({ pubkey: MEMBER.public_key });
+    t.after(() => stale.close());
+    const announcement = providerProfile({
+      providerSecret: MEMBER.secret_key,
+      connectorUrl: stale.url,
+      relays: [theirs.url],
+    });
+
+    const gateway = await startTestGateway({ events: [grantFor(), announcement] });
+    t.after(() => gateway.close());
+
+    await gateway.untilServed(gateway.hostFor(WORKLOAD));
+    assert.equal((await gateway.get(gateway.hostFor(WORKLOAD))).body, 'the application answered');
   });
 });

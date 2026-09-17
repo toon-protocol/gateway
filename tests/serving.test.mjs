@@ -11,7 +11,6 @@ import { canonicalLabel } from '../src/hostname.mjs';
 import { K_GATEWAY_GRANT } from '../src/kinds.mjs';
 import { CONSTANTS, gatewayGrant } from './helpers/events.mjs';
 import { DOMAIN, startTestGateway } from './helpers/harness.mjs';
-import { notResolved } from '../src/serve.mjs';
 import { startStubConnector } from './helpers/stub-connector.mjs';
 
 const GATEWAY = CONSTANTS.gateway.public_key;
@@ -202,11 +201,15 @@ describe('the error page', () => {
   });
 
   it('says a granted workload is not resolved yet, rather than saying nothing', async (t) => {
-    // A resolver that has not found where the workload runs — which is what a
-    // gateway answers before resolution has an answer, and what a resolver
-    // that threw is answered as. A tenant must be able to tell that from a
-    // broken gateway.
-    const gateway = await startTestGateway({ events: [grantFor()], resolve: notResolved });
+    // A resolver with a bug in it. The tenant is told a grant is held and
+    // where the workload runs is not known — never a dropped connection, and
+    // tellably different from a stopped workload.
+    const gateway = await startTestGateway({
+      events: [grantFor()],
+      resolve: async () => {
+        throw new Error('a bug in the resolver');
+      },
+    });
     t.after(() => gateway.close());
 
     const answered = await gateway.get(gateway.hostFor(WORKLOAD));

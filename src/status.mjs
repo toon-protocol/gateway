@@ -26,6 +26,7 @@
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 
+import { connectionOptions } from './dial.mjs';
 import { K_LEASE_REQUEST } from './kinds.mjs';
 import { signEvent } from './nostr.mjs';
 
@@ -34,9 +35,6 @@ export const STATUS_PATH = '/status';
 
 /** The request window of §6.1: a provider refuses one older than its `expiration`. */
 export const REQUEST_TTL_S = 60;
-
-/** How long a member has to answer before it counts as unreachable. */
-export const STATUS_TIMEOUT_MS = 3000;
 
 /**
  * The signed `status` a gateway sends one member, carrying its grant.
@@ -86,12 +84,12 @@ export function statusUrl(connectorUrl) {
  * "no member is running it" and "this member cannot be reached".
  *
  * @param {{
- *   connectorUrl: string, request: object, timeoutMs?: number,
+ *   connectorUrl: string, request: object, timeoutMs: number,
  *   connect?: (host: string, port: number) => import('node:net').Socket | undefined,
  * }} options
  * @returns {Promise<{ status: number | undefined, body: any }>}
  */
-export function askStatus({ connectorUrl, request, timeoutMs = STATUS_TIMEOUT_MS, connect }) {
+export function askStatus({ connectorUrl, request, timeoutMs, connect }) {
   const url = statusUrl(connectorUrl);
   const secure = url.protocol === 'https:';
   const send = secure ? httpsRequest : httpRequest;
@@ -99,9 +97,11 @@ export function askStatus({ connectorUrl, request, timeoutMs = STATUS_TIMEOUT_MS
   const port = Number(url.port || (secure ? 443 : 80));
 
   return new Promise((resolve, reject) => {
-    let socket;
+    // Never pooled: a `status` is asked rarely, and a connection left open in
+    // a pool would outlive the gateway's own shutdown.
+    let dialled;
     try {
-      socket = connect?.(url.hostname, port);
+      dialled = connectionOptions(connect, url.hostname, port, undefined);
     } catch (e) {
       reject(e);
       return;
@@ -118,7 +118,7 @@ export function askStatus({ connectorUrl, request, timeoutMs = STATUS_TIMEOUT_MS
           'content-length': String(Buffer.byteLength(payload)),
           accept: 'application/json',
         },
-        ...(socket === undefined ? {} : { createConnection: () => socket }),
+        ...dialled,
       },
       (answer) => {
         const chunks = [];

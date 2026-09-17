@@ -15,6 +15,23 @@
 // service into a plaintext DNS query. So it is refused, loudly, rather than
 // attempted.
 
+/**
+ * The `http.request` options that dial `host:port` the way this gateway
+ * should: the dialler's socket when it gave one, otherwise `agent`.
+ *
+ * It lives beside `connect` rather than beside either caller, because asking a
+ * member for `status` and forwarding to a workload must dial the same way —
+ * one of them getting it wrong is exactly what hiding is for (M5-6).
+ *
+ * `agent` is a keep-alive pool the caller owns; without one, `agent: false`
+ * gives a fresh connection that no global pool outlives a shutdown with.
+ */
+export const connectionOptions = (connect, host, port, agent) => {
+  const socket = connect?.(host, port);
+  if (socket !== undefined) return { createConnection: () => socket };
+  return { agent: agent ?? false };
+};
+
 /** Whether a host is an `.anyone` address, which is never dialled directly. */
 export const isAnyoneHost = (host) =>
   typeof host === 'string' && /\.anyone\.?$/i.test(host.replace(/^\[|\]$/g, ''));

@@ -1,7 +1,7 @@
 // Forwarding a tenant's request to the workload (spec §12).
 //
-// An HTTP/1.1 reverse proxy, and deliberately a plain one. Two things about it
-// are protocol rather than taste:
+// Plain HTTP/1.1, and deliberately plain. Two things about it are protocol
+// rather than taste:
 //
 //   - `Host` is PRESERVED. The application is reached at a hostname the
 //     gateway owns, but what it must see is the name the tenant used: a
@@ -24,6 +24,7 @@
 
 import { request as httpRequest } from 'node:http';
 
+import { connectionOptions } from './dial.mjs';
 import { unavailable } from './reasons.mjs';
 
 /** Headers that belong to one hop and are never copied to the next. */
@@ -73,14 +74,22 @@ const answeredHeaders = (answer) =>
   Object.fromEntries(Object.entries(answer.headers).filter(([name]) => !HOP_BY_HOP.has(name)));
 
 /**
- * How the connection to the workload is made: through the dialler's socket
- * when it gave one, otherwise Node's own. `pooled` keeps ordinary requests on
- * a keep-alive pool; an upgrade never is, because its socket is hijacked.
+ * A settle-once callback.
+ *
+ * A forwarding attempt can end several ways at once — the workload resets
+ * while the tenant hangs up — and the tenant must be answered once. `done()`
+ * says whether that has happened, which is also how the keep-alive pool
+ * survives: a connection is only destroyed when the attempt had not finished.
  */
-const dialling = (connect, host, port, { pooled }) => {
-  const socket = connect?.(host, port);
-  if (socket !== undefined) return { createConnection: () => socket };
-  return pooled ? {} : { agent: false };
+const settleOnce = (resolve) => {
+  let settled = false;
+  const finish = (outcome) => {
+    if (settled) return;
+    settled = true;
+    resolve(outcome);
+  };
+  finish.done = () => settled;
+  return finish;
 };
 
 /** The refusal a workload that will not answer becomes. */
@@ -102,16 +111,12 @@ const unreachable = (target, workloadId, e) =>
  *   workloadId: string,
  *   secure: boolean,
  *   connect?: (host: string, port: number) => import('node:net').Socket | undefined,
+ *   agent?: import('node:http').Agent,
  * }} context
  */
-export function forwardRequest({ req, res, target, workloadId, secure, connect }) {
-  return new Promise((done) => {
-    let settled = false;
-    const finish = (outcome) => {
-      if (settled) return;
-      settled = true;
-      done(outcome);
-    };
+export function forwardRequest({ req, res, target, workloadId, secure, connect, agent }) {
+  return new Promise((resolve) => {
+    const finish = settleOnce(resolve);
 
     let upstream;
     try {
@@ -121,7 +126,7 @@ export function forwardRequest({ req, res, target, workloadId, secure, connect }
         path: req.url,
         method: req.method,
         headers: forwardedHeaders(req, { secure }),
-        ...dialling(connect, target.host, target.port, { pooled: true }),
+        ...connectionOptions(connect, target.host, target.port, agent),
       });
     } catch (e) {
       finish({ unavailable: unreachable(target, workloadId, e) });
@@ -142,8 +147,10 @@ export function forwardRequest({ req, res, target, workloadId, secure, connect }
     // unless the answer had already started, when there is no longer anywhere
     // to say it and ending the response is the only honest thing left.
     upstream.on('error', (e) => finish({ unavailable: unreachable(target, workloadId, e) }));
+    // A tenant that hung up mid-answer: drop the upstream with it. A response
+    // that FINISHED closes too, and that connection belongs to the pool.
     res.on('close', () => {
-      upstream.destroy();
+      if (!finish.done()) upstream.destroy();
       finish({ served: true });
     });
 
@@ -154,7 +161,8 @@ export function forwardRequest({ req, res, target, workloadId, secure, connect }
 
 /** The handshake bytes an upgraded response is, written back to the tenant. */
 const handshake = (answer) => {
-  const lines = [`HTTP/1.1 ${answer.statusCode} ${answer.statusMessage}`];
+  const reason = answer.statusMessage ? ` ${answer.statusMessage}` : '';
+  const lines = [`HTTP/1.1 ${answer.statusCode}${reason}`];
   for (let i = 0; i < answer.rawHeaders.length; i += 2) {
     lines.push(`${answer.rawHeaders[i]}: ${answer.rawHeaders[i + 1]}`);
   }
@@ -175,13 +183,8 @@ const handshake = (answer) => {
  * }} context
  */
 export function forwardUpgrade({ req, socket, head, target, workloadId, secure, connect }) {
-  return new Promise((done) => {
-    let settled = false;
-    const finish = (outcome) => {
-      if (settled) return;
-      settled = true;
-      done(outcome);
-    };
+  return new Promise((resolve) => {
+    const finish = settleOnce(resolve);
 
     let upstream;
     try {
@@ -193,7 +196,9 @@ export function forwardUpgrade({ req, socket, head, target, workloadId, secure, 
         // `connection` and `upgrade` are hop-by-hop, and this is the one
         // request where they ARE the request: the handshake is what is proxied.
         headers: forwardedHeaders(req, { secure, keep: ['connection', 'upgrade'] }),
-        ...dialling(connect, target.host, target.port, { pooled: false }),
+        // Never pooled: this socket is about to be hijacked, and must not go
+        // back into a pool that another request would then be given.
+        ...connectionOptions(connect, target.host, target.port, undefined),
       });
     } catch (e) {
       finish({ unavailable: unreachable(target, workloadId, e) });
@@ -218,11 +223,18 @@ export function forwardUpgrade({ req, socket, head, target, workloadId, secure, 
       socket.write(handshake(answer));
       answer.pipe(socket);
       answer.on('end', () => finish({ served: true }));
+      // `pipe` does not carry an error across: a workload that resets
+      // mid-answer would otherwise be an uncaught error, and this process is
+      // still serving every other workload.
+      answer.on('error', () => {
+        socket.destroy();
+        finish({ served: true });
+      });
     });
 
     upstream.on('error', (e) => finish({ unavailable: unreachable(target, workloadId, e) }));
     socket.on('close', () => {
-      upstream.destroy();
+      if (!finish.done()) upstream.destroy();
       finish({ served: true });
     });
 

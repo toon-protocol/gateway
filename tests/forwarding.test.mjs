@@ -8,6 +8,7 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import WebSocket from 'ws';
 
+import { verifyEvent } from '../src/nostr.mjs';
 import { CONSTANTS, gatewayGrant, providerProfile } from './helpers/events.mjs';
 import { startTestGateway, until } from './helpers/harness.mjs';
 import { running, startStubConnector } from './helpers/stub-connector.mjs';
@@ -94,15 +95,57 @@ describe('forwarding to the running member', () => {
       assert.ok(asked !== undefined, `member ${index} was not asked`);
       assert.equal(asked.path, '/status');
       assert.equal(asked.signer, GATEWAY, 'the GATEWAY signs, not the tenant');
+      assert.ok(verifyEvent(asked.request), 'and the signature is really the gateway\'s');
       assert.equal(asked.grant?.id, grant.id, 'and carries the grant it holds');
       assert.equal(asked.content.workload_id, WORKLOAD);
-      assert.equal(
-        asked.request.tags.find((tag) => tag[0] === 'p')?.[1],
-        MEMBERS[index].public_key,
-        'addressed to that member',
+
+      const tag = (name) => asked.request.tags.find((entry) => entry[0] === name)?.[1];
+      assert.equal(tag('p'), MEMBERS[index].public_key, 'addressed to that member');
+      assert.equal(asked.request.tags.filter((entry) => entry[0] === 'p').length, 1, 'and only it');
+      assert.equal(tag('op'), 'status');
+      // The §6.1 window: a provider refuses a request without one.
+      const expiration = Number(tag('expiration'));
+      assert.ok(
+        expiration > asked.request.created_at && expiration - asked.request.created_at <= 300,
+        `a window a provider will accept, got ${tag('expiration')}`,
       );
-      assert.equal(asked.request.tags.find((tag) => tag[0] === 'op')?.[1], 'status');
     }
+
+    // And `status` was the ONLY thing asked of anybody. It is a free route
+    // (spec §5): this gateway holds no lease and calls nothing that is priced.
+    for (const connector of connectors) {
+      assert.deepEqual(
+        [...new Set(connector.requests.map((asked) => asked.path))],
+        ['/status'],
+        'a gateway calls no route but `status`',
+      );
+    }
+  });
+
+  it('takes the member earliest in `standby_set` when two answer `running`', async (t) => {
+    const primary = await startStubWorkload({ body: 'the primary' });
+    const standby = await startStubWorkload({ body: 'the standby' });
+    for (const stub of [primary, standby]) t.after(() => stub.close());
+
+    const runningAt = (port) => ({ workloadId }) =>
+      running({
+        workloadId,
+        host: '127.0.0.1',
+        ports: [{ container_port: HTTP_PORT, host_port: port }],
+      });
+
+    // A Takeover settled in two places for an instant. Both are telling the
+    // truth; every gateway holding this grant must still choose the same one.
+    const { profiles } = await standbySet(t, [
+      runningAt(primary.port),
+      runningAt(standby.port),
+      notRunning('reserved'),
+    ]);
+
+    const gateway = await startTestGateway({ events: [grantFor(), ...profiles] });
+    t.after(() => gateway.close());
+
+    assert.equal((await gateway.get(gateway.hostFor(WORKLOAD))).body, 'the primary');
   });
 
   it('says `https` to the workload when the tenant arrived over TLS', async (t) => {

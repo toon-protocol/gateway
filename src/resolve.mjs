@@ -10,11 +10,16 @@
 // settled in two places at once still resolves the same way everywhere.
 //
 // A member that answers `reserved`, `stopped` or an ending is simply not the
-// target: that is a Warm Standby doing its job (spec §6.7), not a failure. A
-// member that cannot be reached is not the target either, and the two are told
-// apart in what the tenant is answered, because they mean opposite things —
-// "nothing is running your workload" and "something may be, and we cannot see
-// it".
+// target: that is a Warm Standby doing its job (spec §6.7), not a failure.
+//
+// What a member TOLD US is the distinction that matters, and it is not the
+// same as whether it answered at all. `reserved` tells us the member is not
+// running the workload. A connector that never replied tells us nothing. And
+// neither does a REFUSAL — `bad_grant` on an expired grant, `unknown_workload`
+// from a member that never held the lease — even though it arrived as an HTTP
+// response. Refusals are therefore counted with silence, because saying "no
+// member is running it" on the strength of a `bad_grant` would tell a tenant a
+// fact about its lease that this gateway never learned.
 //
 // WHAT M5-5 TAKES OVER FROM HERE. The current target per workload lives in
 // `targets` and nowhere else; `resolveNow` is the one way a resolution is
@@ -24,9 +29,19 @@
 // M5-5 adds is a reason to re-ask (a Takeover, a cadence, an expiry) rather
 // than a different way to ask.
 
+import { Agent } from 'node:http';
+
 import { forwardRequest, forwardUpgrade } from './forward.mjs';
 import { unavailable } from './reasons.mjs';
-import { askStatus, statusRequest, STATUS_TIMEOUT_MS } from './status.mjs';
+import { askStatus, statusRequest } from './status.mjs';
+
+/**
+ * How long resolution waits for anything: a member's Profile off a relay, and
+ * that member's answer to `status`. One number rather than two, because what
+ * an operator is actually setting is how long a tenant waits for a first
+ * request while this gateway finds out where the workload is.
+ */
+export const RESOLVE_TIMEOUT_MS = 3000;
 
 /**
  * The host port a granted `http_port` was published at.
@@ -52,7 +67,7 @@ export function hostPortFor(access, httpPort) {
  *   dialer?: { connect: (host: string, port: number) => import('node:net').Socket | undefined },
  *   now?: () => number,
  *   log?: (line: string) => void,
- *   statusTimeoutMs?: number,
+ *   timeoutMs?: number,
  * }} deps
  */
 export function createResolver({
@@ -61,7 +76,7 @@ export function createResolver({
   dialer,
   now = () => Math.floor(Date.now() / 1000),
   log = () => {},
-  statusTimeoutMs = STATUS_TIMEOUT_MS,
+  timeoutMs = RESOLVE_TIMEOUT_MS,
 }) {
   /** Where each workload is running, as far as this gateway knows. */
   /** @type {Map<string, { host: string, port: number, member: string, at: number }>} */
@@ -71,16 +86,26 @@ export function createResolver({
   const inFlight = new Map();
 
   const connect = dialer?.connect;
+  // The gateway's own keep-alive pool for forwarded requests, so a busy
+  // workload is not a new TCP connection per request and `close()` still
+  // leaves nothing open. Node's global agent would survive a shutdown.
+  const agent = new Agent({ keepAlive: true });
 
   /**
    * Ask ONE member where the workload is.
    *
-   * @returns {Promise<{ reached: true, target?: object } | { reached: false, why: string }>}
+   * `told` is whether the member told us about the LEASE — not whether it
+   * answered. A refusal is an HTTP response and tells us nothing.
+   *
+   * @returns {Promise<{ told: true, target?: object } | { told: false, why: string }>}
    */
   const askMember = async (grant, member) => {
     const profile = profiles.get(member);
     if (profile === undefined) {
-      return { reached: false, why: 'no Provider Profile for it was found on any relay watched' };
+      return {
+        told: false,
+        why: `${member}: no Provider Profile for it was found on any relay watched`,
+      };
     }
 
     let answered;
@@ -94,24 +119,27 @@ export function createResolver({
           grantEvent: grant.event,
           now: now(),
         }),
-        timeoutMs: statusTimeoutMs,
+        timeoutMs,
         connect,
       });
     } catch (e) {
-      return { reached: false, why: `${profile.connectorUrl}: ${e instanceof Error ? e.message : String(e)}` };
+      return {
+        told: false,
+        why: `${profile.connectorUrl}: ${e instanceof Error ? e.message : String(e)}`,
+      };
     }
 
     const body = answered.body;
-    // A refusal IS an answer: a member that says `bad_grant` or
-    // `unknown_workload` has been reached and is not running the workload.
+    // A refusal is not an answer about the lease: it says this gateway may not
+    // read it, or that this member never held it. Either way nothing was
+    // learned about whether the workload is running here.
     if (body?.error !== undefined) {
-      log(`member ${member} refused \`status\` for ${grant.workloadId}: ${body.error}`);
-      return { reached: true };
+      return { told: false, why: `${profile.connectorUrl}: refused \`status\` (${body.error})` };
     }
-    if (body?.state !== 'running') return { reached: true };
+    if (body?.state !== 'running') return { told: true };
     if (typeof body.access?.host !== 'string' || body.access.host === '') {
       log(`member ${member} answers \`running\` for ${grant.workloadId} with no \`access.host\``);
-      return { reached: true };
+      return { told: true };
     }
     const port = hostPortFor(body.access, grant.httpPort);
     if (port === undefined) {
@@ -119,22 +147,22 @@ export function createResolver({
         `member ${member} answers \`running\` for ${grant.workloadId} but publishes no host port ` +
           `for the grant's \`http_port\` ${grant.httpPort}`,
       );
-      return { reached: true };
+      return { told: true };
     }
-    return { reached: true, target: { host: body.access.host, port, member, at: now() } };
+    return { told: true, target: { host: body.access.host, port, member, at: now() } };
   };
 
   /** Ask every member, and take the first that is running. */
   const ask = async (grant) => {
     const members = grant.standbySet;
     profiles.watch(members);
-    await profiles.waitFor(members);
+    await profiles.waitFor(members, { timeoutMs });
 
     const answers = await Promise.all(members.map((member) => askMember(grant, member)));
 
     // `standby_set` order, primary first: whichever members happened to answer
     // first, the same Standby Set resolves the same way on every gateway.
-    const found = answers.find((answer) => answer.reached && answer.target !== undefined);
+    const found = answers.find((answer) => answer.told && answer.target !== undefined);
     if (found?.target !== undefined) {
       const target = /** @type {any} */ (found.target);
       const held = targets.get(grant.workloadId);
@@ -149,8 +177,8 @@ export function createResolver({
     }
 
     targets.delete(grant.workloadId);
-    const unreached = answers.filter((answer) => !answer.reached);
-    if (unreached.length === 0) {
+    const silent = answers.filter((answer) => !answer.told);
+    if (silent.length === 0) {
       return {
         unavailable: unavailable('no_running_member', {
           workloadId: grant.workloadId,
@@ -158,16 +186,12 @@ export function createResolver({
         }),
       };
     }
+    const why = silent.map((answer) => answer.why).join('; ');
     log(
-      `workload ${grant.workloadId}: ${unreached.length} of ${members.length} member(s) could not ` +
-        `be reached: ${unreached.map((answer) => answer.why).join('; ')}`,
+      `workload ${grant.workloadId}: ${silent.length} of ${members.length} member(s) told this ` +
+        `gateway nothing about the lease: ${why}`,
     );
-    return {
-      unavailable: unavailable('member_unreachable', {
-        workloadId: grant.workloadId,
-        why: unreached.map((answer) => answer.why).join('; '),
-      }),
-    };
+    return { unavailable: unavailable('member_unreachable', { workloadId: grant.workloadId, why }) };
   };
 
   /** Start a resolution, or join the one already running for this workload. */
@@ -193,7 +217,7 @@ export function createResolver({
     const forwarded =
       res === undefined
         ? await forwardUpgrade({ req, socket, head, target, workloadId: grant.workloadId, secure, connect })
-        : await forwardRequest({ req, res, target, workloadId: grant.workloadId, secure, connect });
+        : await forwardRequest({ req, res, target, workloadId: grant.workloadId, secure, connect, agent });
 
     // The address we believed in did not answer. Forget it, so the next
     // request asks the Standby Set again instead of retrying a dead host.
@@ -215,6 +239,7 @@ export function createResolver({
     close() {
       targets.clear();
       inFlight.clear();
+      agent.destroy();
     },
   };
 }

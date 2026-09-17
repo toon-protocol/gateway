@@ -76,8 +76,10 @@ grant.standby_set  ──▶  Profile(member).connector_url  ──POST status�
 
 The **running member** is the one answering `state: "running"` with `access`.
 A member answering `reserved`, `stopped` or an ending is simply not the target
-— that is a Warm Standby doing its job, not a failure — and neither is one
-that cannot be reached. Asking all members rather than the primary first is
+— that is a Warm Standby doing its job, not a failure. A member that *refuses*
+(`bad_grant`, `unknown_workload`) is a third thing: it answered, and it told
+this gateway nothing about the lease, so it is counted with the members that
+could not be reached rather than with the ones that answered. Asking all members rather than the primary first is
 the point: a Takeover moves a workload with no tenant online to say so, so the
 member listed first is exactly the one that may no longer have it.
 
@@ -89,7 +91,7 @@ nothing has to be guessed.
 
 ## What a forwarded request carries
 
-An HTTP/1.1 reverse proxy, with three things fixed because applications depend
+Plain HTTP/1.1 forwarding, with three things fixed because applications depend
 on them (spec §12.5):
 
 | Header | What the workload sees |
@@ -132,7 +134,7 @@ Environment only; there is no config file.
 | `GATEWAY_HTTPS_PORT` | `443` | Where TLS is terminated. |
 | `GATEWAY_HTTP_PORT` | — | A plain-HTTP listener, for development or for a deployment terminating TLS in front. Set it or the certificate pair, or this process refuses to start. |
 | `GATEWAY_BIND_ADDR` | `0.0.0.0` | What to listen on. |
-| `GATEWAY_STATUS_TIMEOUT_MS` | `3000` | How long a Standby Set member has to answer `status` before it counts as unreachable. Every member is asked at once, so this is the whole of what one slow member costs a tenant's first request. |
+| `GATEWAY_RESOLVE_TIMEOUT_MS` | `3000` | How long resolution waits for anything it needs — a member's Profile off a relay, and that member's answer to `status`. Every member is asked at once, so this is the whole of what one slow member costs a tenant's first request. |
 | `TOON_SOCKS_PROXY` | — | `socks5h://<host>:<port>` for `.anyone` hosts. Validated at startup; **dialled from M5-6**. The scheme must be `socks5h`: under plain `socks5` this process would resolve the destination itself, putting a hidden service into a plaintext DNS query. |
 
 Startup collects **every** missing or malformed key and refuses with all of
@@ -186,22 +188,32 @@ puts in front of these listeners (a connector, a load balancer, nothing at
 all) is its own choice, and the plain-HTTP listener is there for the case
 where TLS is terminated ahead of this process.
 
-### How `status` is sent — a decision to know about
+### How `status` is sent — read this before deploying
 
-`status` is a **free** route (spec §5), so there is no payment to make, no
-claim to attach and no channel to open. What this process sends is the §6.1.1
-packet body — `{ "request": <event> }` — as a plain `POST` to the member's
-connector at the `status` path beside its `connector_url`: the body a provider
-reads once its connector has unsealed the envelope, and the path the wire
-fixtures record as `http_path`.
+`status` is a **free** route (spec §5): no payment to make, no claim to attach,
+no channel to open. What this process sends is the §6.1.1 packet body —
+`{ "request": <event> }` — as a plain `POST` to the `status` path beside the
+member's `connector_url`. That is the body a provider reads once its connector
+has unsealed the envelope, and the path the wire fixtures record as
+`http_path`.
 
-The alternative is to carry that same body inside a sealed ILP packet through
-the member's connector. It is not done here because it would **buy nothing** —
+**The limit of that, said plainly.** A connector that terminates
+`<addr>.status` expects a *sealed ILP packet* at its client edge, and answers
+nothing on a plain `POST`. So this carriage reaches a member whose free
+`status` route is served plainly — the provider app itself, or a connector
+configured to forward it — and **not** a member reachable only through a
+sealed client edge. The spec fixes the *request* and leaves the carriage to
+§5 and the member's connector (spec §12.4), so both are gateways; this one has
+only the first.
+
+The sealed carriage was not written here because it would **buy nothing** —
 the route is free — while pulling a payment client, a channel and a sealing
-key into a process whose whole point is that it holds none of them. A
-deployment whose members will only answer that way changes exactly one file,
-[`src/status.mjs`](src/status.mjs): the request, the signature and the grant
-are identical either way. What changes is the carriage, not the request.
+key into a process whose whole point is that it holds none of them. Adding it
+changes exactly one file, [`src/status.mjs`](src/status.mjs), and would read
+`connector_seal_key` and `ilp_address` off the Profile that
+[`src/profiles.mjs`](src/profiles.mjs) already has: the request, the signature
+and the grant are identical either way. What changes is the carriage, not the
+request.
 
 ## The error page
 
@@ -246,7 +258,7 @@ HTML page and the header all follow. M5-6 adds *no proxy configured*.
 | `src/profiles.mjs` | The Standby Set members' Profiles: connectors, Relay Sets, cadences. |
 | `src/resolve.mjs` | Resolution: ask every member, pick the running one, hold the target. |
 | `src/status.mjs` | One `status` request: signing it, where it is sent, reading the answer. |
-| `src/forward.mjs` | The reverse proxy: headers, the response, and WebSocket upgrades. |
+| `src/forward.mjs` | Forwarding: the headers, the answer, and WebSocket upgrades. |
 | `src/dial.mjs` | The one place a TCP connection is opened — and the one host it refuses. |
 | `src/hostname.mjs` | The canonical label: base32, and reading a label out of a `Host`. |
 | `src/nostr.mjs` | NIP-01: serialize, id, verify, sign. |

@@ -38,8 +38,10 @@ export const REASONS = {
     'its own workload answers `stopped`, and a lease that ended says so (spec \u00a76.7).',
 
   member_unreachable: ({ workloadId, address, why }) =>
-    `a member could not be reached: this gateway holds a grant for workload ${workloadId} and ` +
-    `cannot reach ${address === undefined ? 'the Standby Set member that would answer for it' : address}` +
+    (address === undefined
+      ? `no member could be asked: this gateway holds a grant for workload ${workloadId} and no ` +
+        'member of its Standby Set told it whether the workload is running'
+      : `the member running workload ${workloadId} could not be reached at ${address}`) +
     `${why === undefined ? '' : ` (${why})`}. Something may well be running the workload; this ` +
     'gateway cannot see it, which is not the same as nothing running (spec \u00a712).',
 };
