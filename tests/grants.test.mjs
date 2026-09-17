@@ -122,6 +122,27 @@ describe('replacement', () => {
     assert.equal(grants.find(label), undefined);
   });
 
+  it('lets only the tenant of the grant held replace it', () => {
+    // Anybody may publish a kind 30438 with this `d`, and a gateway watches
+    // the workload ids it holds (spec §12.7) — so a later event from another
+    // key must not be able to take a workload off this gateway.
+    const lines = [];
+    const grants = registry((line) => lines.push(line));
+    grants.offer(grantFor({ createdAt: 1700000000 }));
+    assert.equal(
+      grants.offer(
+        grantFor({
+          tenantSecret: CONSTANTS.other_tenant.secret_key,
+          createdAt: 1700000100,
+          gateway: 'cc'.repeat(32),
+        }),
+      ).accepted,
+      false,
+    );
+    assert.equal(grants.find(label)?.workloadId, WORKLOAD, 'the tenant\'s own grant stands');
+    assert.match(lines.join('\n'), /tenant/i);
+  });
+
   it('keeps a workload when an EARLIER grant named another gateway', () => {
     const grants = registry();
     grants.offer(grantFor({ createdAt: 1700000100 }));

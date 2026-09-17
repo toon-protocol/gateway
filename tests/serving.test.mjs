@@ -10,7 +10,7 @@ import { describe, it } from 'node:test';
 import { canonicalLabel } from '../src/hostname.mjs';
 import { K_GATEWAY_GRANT } from '../src/kinds.mjs';
 import { CONSTANTS, gatewayGrant } from './helpers/events.mjs';
-import { DOMAIN, startTestGateway } from './helpers/harness.mjs';
+import { DOMAIN, startTestGateway, until } from './helpers/harness.mjs';
 import { startStubConnector } from './helpers/stub-connector.mjs';
 
 const GATEWAY = CONSTANTS.gateway.public_key;
@@ -74,11 +74,9 @@ describe('grant discovery', () => {
     assert.equal((await gateway.get(host)).json().httpPort, 8080);
 
     gateway.publish(grantFor({ createdAt: 1700000100, httpPort: 9090, name: 'shop' }));
-    await import('./helpers/harness.mjs').then(({ until }) =>
-      until(async () => (await gateway.get(host)).json().httpPort === 9090, {
-        what: 'the later grant to replace the earlier one',
-      }),
-    );
+    await until(async () => (await gateway.get(host)).json().httpPort === 9090, {
+      what: 'the later grant to replace the earlier one',
+    });
     const answered = await gateway.get(host);
     assert.equal(answered.json().httpPort, 9090);
     assert.equal(answered.json().name, 'shop', '`name` is carried, for M5-4 to serve');
@@ -94,22 +92,29 @@ describe('grant discovery', () => {
     assert.equal(answered.headers['toon-gateway-reason'], 'no_grant');
   });
 
-  it('never sees a rotation to another gateway on its own filter — that is M5-5', async (t) => {
+  it('sees a rotation to another gateway, which its own `#p` filter cannot carry', async (t) => {
     // A grant rotating a workload away names the NEW gateway in its `p` tag
-    // (spec §3.1.3), so THIS gateway's `#p` filter does not carry it. The
-    // withdrawal rule itself is in place (`tests/grants.test.mjs`); what M5-5
-    // still has to add is a subscription that delivers such a grant — by `#d`
-    // on each held workload, or by the tenant as author.
+    // (spec §3.1.3), so the filter above does not carry it. What delivers it
+    // is a second watch, on the workload ids this gateway holds (§12.7).
     const gateway = await startTestGateway({
       events: [grantFor({ createdAt: 1700000000 })],
       resolve: echoGrant,
     });
     t.after(() => gateway.close());
 
+    const byWorkload = () =>
+      gateway.relay.requests.filter((r) =>
+        r.filters.some((f) => f.kinds?.includes(K_GATEWAY_GRANT) && f['#d'] !== undefined),
+      );
+    await until(() => byWorkload().length > 0, { what: 'the watch on the workloads held' });
+    assert.equal(byWorkload().length, 1, 'one watch for every workload held, not one each');
+    assert.deepEqual(byWorkload()[0].filters[0], { kinds: [K_GATEWAY_GRANT], '#d': [WORKLOAD] });
+
     const host = gateway.hostFor(WORKLOAD);
+    assert.equal((await gateway.get(host)).status, 200);
+
     gateway.publish(grantFor({ createdAt: 1700000100, gateway: 'cc'.repeat(32) }));
-    await new Promise((done) => setTimeout(done, 50));
-    assert.equal((await gateway.get(host)).status, 200, 'still served, because it was never seen');
+    await gateway.untilReason(host, 'no_grant');
   });
 
   it('keeps serving a workload whose grant carried an unusable name', async (t) => {

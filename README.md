@@ -121,6 +121,66 @@ An expired grant keeps its name until another grant claims it, so a tenant
 whose readable URL stopped working is told the *grant* expired rather than
 that the hostname means nothing here.
 
+## Following the workload
+
+Resolution answers *where is this workload?* once. Three things keep that
+answer true, and a fourth stops it being asked at all (spec §12.7).
+
+**A Takeover.** For every workload it holds a grant for, this process watches
+kind `30433` with `#d` the workload id on the **primary's Relay Set** — the
+`relays` of `standby_set[0]`'s Provider Profile, which need not be a relay it
+is configured with. A claim that does not verify, or that is signed by a key
+the grant's `standby_set` does not name, is ignored. Where several members
+claim the same workload, the **earliest** claim decides, as it does for the
+standbys themselves: a later claimant can only bring the deadline forward,
+never push it out.
+
+**The settle window.** A Takeover event does not mean the workload has moved:
+it means a standby announced that it *intends* to take it, and spec §7.1 gives
+that standby **two of the primary's Liveness cadences**, from its own
+announcement, before it starts anything. So nothing is re-asked until
+`created_at + 2 × liveness_cadence_s` of the claim — counted from the event,
+not from when this process saw it, so a slow relay or a restart does not move
+the deadline. Asking earlier would cost every member a `status` and find
+nothing running.
+
+**A Liveness cadence.** Independently of any event, the Standby Set is asked
+again once per `liveness_cadence_s` while a target is held, because a
+self-stop, an expiry and an eviction announce nothing to a gateway. A primary
+whose Profile states no `liveness_cadence_s` — a defective Profile, spec §4.1
+requires one — is followed at an assumed 60 s rather than not followed: that
+is the provider's doing, and the tenant would pay for it. The re-ask waits
+while a settle window is running, for the reason above, and no longer than the
+window itself.
+
+**The last known target keeps serving.** While a re-resolution is in flight,
+requests keep going to the member last seen running; only a *finished*
+resolution moves the target or withdraws it. So a slow relay, a slow connector
+or a member that is taking its time costs the freshness of the answer and not
+the service — for as long as the resolution is in flight. A resolution that
+finished and learned nothing does withdraw the target, and says which of the
+two reasons it was.
+
+Two things stop a workload being served at all, with nothing for an operator
+to do: a grant that passes its `expires_at` (`grant_expired`, and the grant is
+not carried to a provider afterwards, which would refuse it `bad_grant`), and
+a **later grant from the same tenant naming another gateway**. That rotation
+names the *other* gateway in its `p` tag, so the one filter of *How a workload
+arrives here* cannot carry it; it is found on a second watch, kind `30438`
+with `#d` the workload ids held. Because that filter carries events from
+anyone, only the **tenant of the grant held** may replace it — otherwise a
+stranger could publish a later grant with the same `d` and take any workload
+off this gateway.
+
+```
+Takeover created_at  ──2 × liveness_cadence_s──▶  ask every member  ──▶  the URL moves
+        (the previous target keeps serving all the way across)
+```
+
+So: after a Takeover a URL moves about one settle window after the claim was
+published, plus up to one `GATEWAY_FOLLOW_TICK_MS`; after a self-stop, an
+expiry or an eviction it stops being served within one cadence.
+
 ## Configuration
 
 Environment only; there is no config file.
@@ -135,6 +195,7 @@ Environment only; there is no config file.
 | `GATEWAY_HTTP_PORT` | — | A plain-HTTP listener, for development or for a deployment terminating TLS in front. Set it or the certificate pair, or this process refuses to start. |
 | `GATEWAY_BIND_ADDR` | `0.0.0.0` | What to listen on. |
 | `GATEWAY_RESOLVE_TIMEOUT_MS` | `3000` | How long resolution waits for anything it needs — a member's Profile off a relay, and that member's answer to `status`. Every member is asked at once, so this is the whole of what one slow member costs a tenant's first request. |
+| `GATEWAY_FOLLOW_TICK_MS` | `1000` | How often this process looks at the clock while following a workload. It decides **nothing**: a settle window and a Liveness cadence are counted in the grant's and the Profile's own seconds, and this is only how late it may be in noticing that one has passed. Tests set it to tens of milliseconds so a clock they control is noticed at once. |
 | `TOON_SOCKS_PROXY` | — | `socks5h://<host>:<port>` for `.anyone` hosts. Validated at startup; **dialled from M5-6**. The scheme must be `socks5h`: under plain `socks5` this process would resolve the destination itself, putting a hidden service into a plaintext DNS query. |
 
 Startup collects **every** missing or malformed key and refuses with all of
@@ -257,6 +318,7 @@ HTML page and the header all follow. M5-6 adds *no proxy configured*.
 | `src/relays.mjs` | The relay pool: subscriptions that stay open, and the grant filter. |
 | `src/profiles.mjs` | The Standby Set members' Profiles: connectors, Relay Sets, cadences. |
 | `src/resolve.mjs` | Resolution: ask every member, pick the running one, hold the target. |
+| `src/follow.mjs` | Following the workload: the Takeover watch, the settle window, the per-cadence re-ask, the rotation watch. |
 | `src/status.mjs` | One `status` request: signing it, where it is sent, reading the answer. |
 | `src/forward.mjs` | Forwarding: the headers, the answer, and WebSocket upgrades. |
 | `src/dial.mjs` | The one place a TCP connection is opened — and the one host it refuses. |
@@ -332,7 +394,7 @@ works at:
 | `resolver.current(workloadId)` | Where the workload is running, as far as this gateway knows — the *last known target*, which keeps serving while a re-resolution is in flight. |
 | `resolver.forget(workloadId)` | Stop serving that target. |
 | `gateway.profiles.get(pubkey)` | A member's `connectorUrl`, its `relays` and its `livenessCadenceS`. |
-| `gateway.pool.subscribe({…})` | Open another relay subscription — a Takeover watch, say. |
+| `gateway.pool.subscribe({…})` | Open another relay subscription. |
 
 Spec and ADR references are to `toon-protocol/TOON_Network`:
 `docs/spec/toon-network-v1.md` and

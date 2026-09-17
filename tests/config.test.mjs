@@ -8,6 +8,7 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 
 import { readConfig } from '../src/config.mjs';
+import { FOLLOW_TICK_MS } from '../src/follow.mjs';
 import { CONSTANTS } from './helpers/events.mjs';
 
 const SECRET = CONSTANTS.gateway.secret_key;
@@ -118,6 +119,21 @@ describe('readConfig', () => {
   it('refuses a port that is not a port', () => {
     assert.match(refusal({ ...complete, GATEWAY_HTTPS_PORT: 'https' }), /GATEWAY_HTTPS_PORT/);
     assert.match(refusal({ ...complete, GATEWAY_HTTP_PORT: '70000' }), /GATEWAY_HTTP_PORT/);
+  });
+});
+
+describe('how often it looks at the clock', () => {
+  // A settle window and a Liveness cadence are counted in the grant's and the
+  // Profile's own seconds (spec §12.7); this is only how late the gateway may
+  // be in noticing that one has passed.
+  it('defaults to a second, and takes a number of milliseconds', () => {
+    assert.equal(read(complete).followTickMs, FOLLOW_TICK_MS);
+    assert.equal(read({ ...complete, GATEWAY_FOLLOW_TICK_MS: '20' }).followTickMs, 20);
+  });
+
+  it('refuses a tick that is not a number of milliseconds', () => {
+    assert.match(refusal({ ...complete, GATEWAY_FOLLOW_TICK_MS: 'often' }), /GATEWAY_FOLLOW_TICK_MS/);
+    assert.match(refusal({ ...complete, GATEWAY_FOLLOW_TICK_MS: '0' }), /GATEWAY_FOLLOW_TICK_MS/);
   });
 });
 
