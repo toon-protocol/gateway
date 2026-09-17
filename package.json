@@ -15,6 +15,7 @@
     "@noble/curves": "^2.0.0",
     "@noble/hashes": "^2.0.0",
     "@toon-protocol/client": "^3.0.0",
+    "socks": "^2.8.10",
     "ws": "^8.18.0"
   },
   "devDependencies": {

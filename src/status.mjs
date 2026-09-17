@@ -85,7 +85,7 @@ export function statusUrl(connectorUrl) {
  *
  * @param {{
  *   connectorUrl: string, request: object, timeoutMs: number,
- *   connect?: (host: string, port: number) => import('node:net').Socket | undefined,
+ *   connect?: import('./dial.mjs').Dial,
  * }} options
  * @returns {Promise<{ status: number | undefined, body: any }>}
  */
@@ -101,7 +101,7 @@ export function askStatus({ connectorUrl, request, timeoutMs, connect }) {
     // a pool would outlive the gateway's own shutdown.
     let dialled;
     try {
-      dialled = connectionOptions(connect, url.hostname, port, undefined);
+      dialled = connectionOptions(connect, url.hostname, port, undefined, { secure });
     } catch (e) {
       reject(e);
       return;

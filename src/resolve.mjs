@@ -31,6 +31,7 @@
 
 import { Agent } from 'node:http';
 
+import { refusalFor } from './dial.mjs';
 import { forwardRequest, forwardUpgrade } from './forward.mjs';
 import { unavailable } from './reasons.mjs';
 import { askStatus, statusRequest } from './status.mjs';
@@ -64,7 +65,7 @@ export function hostPortFor(access, httpPort) {
  * @param {{
  *   secretKey: () => string,
  *   profiles: ReturnType<typeof import('./profiles.mjs').createProfiles>,
- *   dialer?: { connect: (host: string, port: number) => import('node:net').Socket | undefined },
+ *   dialer?: { connect: import('./dial.mjs').Dial },
  *   now?: () => number,
  *   log?: (line: string) => void,
  *   timeoutMs?: number,
@@ -97,7 +98,15 @@ export function createResolver({
    * `told` is whether the member told us about the LEASE — not whether it
    * answered. A refusal is an HTTP response and tells us nothing.
    *
-   * @returns {Promise<{ told: true, target?: object } | { told: false, why: string }>}
+   * `refusal` is the one case that is neither: a member THIS GATEWAY would not
+   * dial — an `.anyone` connector with no proxy configured (spec §12.8). That
+   * is a fact about this gateway's configuration, and the tenant is told it
+   * by name rather than as one more member that could not be reached.
+   *
+   * @returns {Promise<
+   *   { told: true, target?: object } |
+   *   { told: false, why: string, refusal?: ReturnType<typeof unavailable> }
+   * >}
    */
   const askMember = async (grant, member) => {
     const profile = profiles.get(member);
@@ -126,6 +135,7 @@ export function createResolver({
       return {
         told: false,
         why: `${profile.connectorUrl}: ${e instanceof Error ? e.message : String(e)}`,
+        refusal: refusalFor(e, grant.workloadId),
       };
     }
 
@@ -178,6 +188,14 @@ export function createResolver({
 
     targets.delete(grant.workloadId);
     const silent = answers.filter((answer) => !answer.told);
+    // A member this gateway would not even dial is answered by name: no
+    // proxy is something the operator fixes, and `member_unreachable` would
+    // send them looking at the member.
+    const notDialled = silent.find((answer) => answer.refusal !== undefined);
+    if (notDialled?.refusal !== undefined) {
+      log(`workload ${grant.workloadId}: ${notDialled.why}`);
+      return { unavailable: notDialled.refusal };
+    }
     if (silent.length === 0) {
       return {
         unavailable: unavailable('no_running_member', {

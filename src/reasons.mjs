@@ -10,7 +10,7 @@
 // far — and call `defineReason` only when the reason belongs beside the code
 // that raises it, in another module. Either way nothing else changes: the HTTP
 // status, the JSON shape, the HTML page and the header are all derived from
-// the row. M5-6 adds the missing proxy.
+// the row.
 //
 // A row is `code -> (context) => message`. The context is whatever the caller
 // knows; a message that names the hostname or the workload id is worth far
@@ -44,6 +44,13 @@ export const REASONS = {
       : `the member running workload ${workloadId} could not be reached at ${address}`) +
     `${why === undefined ? '' : ` (${why})`}. Something may well be running the workload; this ` +
     'gateway cannot see it, which is not the same as nothing running (spec \u00a712).',
+
+  no_proxy: ({ workloadId, address }) =>
+    `no proxy for \`.anyone\` hosts: reaching workload ${workloadId} means dialling ${address}, ` +
+    'a Hidden Provider\'s `.anyone` address (spec \u00a710), and this gateway has no TOON_SOCKS_PROXY ' +
+    'to reach one through. An `.anyone` name is never resolved or dialled directly, so nothing was ' +
+    'tried. Set TOON_SOCKS_PROXY to a `socks5h://` proxy \u2014 a running `anon` client \u2014 and ' +
+    'restart this gateway (spec \u00a712.8).',
 };
 
 /**

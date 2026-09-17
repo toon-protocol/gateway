@@ -122,7 +122,7 @@ describe('readConfig', () => {
 });
 
 describe('the .anyone proxy', () => {
-  // Accepted and validated here; M5-6 is what dials through it.
+  // Accepted and validated here; `src/dial.mjs` is what dials through it.
   it('takes a socks5h proxy', () => {
     const config = read({ ...complete, TOON_SOCKS_PROXY: 'socks5h://anon:9050' });
     assert.equal(config.socksProxy, 'socks5h://anon:9050');

@@ -15,6 +15,8 @@
 
 import { createServer } from 'node:http';
 
+import { peerOf } from './peer.mjs';
+
 /** `{ "error", "message" }` — the refusal shape of every route (spec §5). */
 export const refusal = (error, message) => ({ error, message });
 
@@ -39,7 +41,7 @@ export const running = ({ workloadId, host = '127.0.0.1', ports = [], sshPort = 
  *   connection and never replies — a member that cannot be reached in time.
  */
 export async function startStubConnector({ pubkey, answer, silent = false } = {}) {
-  /** @type {{ path: string, body: any, request: any, content: any, grant: any, signer: string | undefined }[]} */
+  /** @type {{ path: string, body: any, request: any, content: any, grant: any, signer: string | undefined, peer: { address: string, port: number } }[]} */
   const requests = [];
   let respond = answer ?? (() => undefined);
   let quiet = silent;
@@ -68,6 +70,8 @@ export async function startStubConnector({ pubkey, answer, silent = false } = {}
         content,
         grant: content?.grant,
         signer: request?.pubkey,
+        // Who connected: a gateway directly, or a proxy on its behalf (M5-6).
+        peer: peerOf(req),
       });
 
       if (quiet) return; // connected, and never answered.
