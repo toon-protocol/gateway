@@ -26,6 +26,9 @@ log(`this gateway is ${config.publicKey}`);
 log(`name a workload's Gateway Grant at this key to have it served under *.${config.domain}`);
 log(`watching ${config.relays.length} relay(s) for grants: ${config.relays.join(', ')}`);
 if (config.socksProxy !== undefined) log(`.anyone hosts will be dialled through ${config.socksProxy}`);
+for (const [from, to] of config.dialRewrites) {
+  log(`dial rewrite: ${from} is dialled at ${to.host}${to.port === undefined ? '' : `:${to.port}`} (GATEWAY_DIAL_REWRITE)`);
+}
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {

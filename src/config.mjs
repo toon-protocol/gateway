@@ -16,6 +16,7 @@ import { validateSocks5hUrl } from '@toon-protocol/client';
 import { FOLLOW_TICK_MS } from './follow.mjs';
 import { publicKeyOf } from './nostr.mjs';
 import { RESOLVE_TIMEOUT_MS } from './resolve.mjs';
+import { readDialRewrites } from './rewrite.mjs';
 
 const DEFAULT_HTTPS_PORT = 443;
 
@@ -160,6 +161,18 @@ export function readConfig(env, { readFile = (p) => readFileSync(p, 'utf8') } = 
     }
   }
 
+  // Where an advertised address is dialled instead (`src/rewrite.mjs`): a
+  // development sandbox's compose names and host loopback. Empty in
+  // production, where what a member advertises is where it is.
+  let dialRewrites = new Map();
+  if (env.GATEWAY_DIAL_REWRITE !== undefined && env.GATEWAY_DIAL_REWRITE.trim() !== '') {
+    try {
+      dialRewrites = readDialRewrites(env.GATEWAY_DIAL_REWRITE);
+    } catch (e) {
+      problems.push(e instanceof Error ? e.message : String(e));
+    }
+  }
+
   if (problems.length > 0) {
     throw new Error(
       `this Workload Gateway cannot start:\n${problems.map((p) => `  - ${p}`).join('\n')}`,
@@ -180,5 +193,6 @@ export function readConfig(env, { readFile = (p) => readFileSync(p, 'utf8') } = 
     socksProxy,
     resolveTimeoutMs,
     followTickMs,
+    dialRewrites,
   };
 }
