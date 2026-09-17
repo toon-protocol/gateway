@@ -104,14 +104,21 @@ describe('readGrant', () => {
     );
   });
 
-  it('refuses a `name` that is not one DNS label, without touching the rest', () => {
+  it('drops a `name` that is not one DNS label, and keeps the rest of the grant', () => {
+    // A bad `name` must not cost the workload its CANONICAL hostname, which is
+    // the one a tenant can always derive (M5-4 is what serves the name).
     for (const name of ['not a label', 'a.b', '-lead', 'x'.repeat(64), '', 5]) {
-      assert.match(
-        rejection(gatewayGrant({ workloadId: WORKLOAD, gateway: GATEWAY, name })),
-        /name/i,
-        JSON.stringify(name),
-      );
+      const grant = read(gatewayGrant({ workloadId: WORKLOAD, gateway: GATEWAY, name }));
+      assert.equal(grant.name, undefined, JSON.stringify(name));
+      assert.match(grant.nameProblem, /name/i, JSON.stringify(name));
+      assert.equal(grant.workloadId, WORKLOAD, 'the grant itself survives');
     }
+  });
+
+  it('carries a good `name` with no complaint', () => {
+    const grant = read(gatewayGrant({ workloadId: WORKLOAD, gateway: GATEWAY, name: 'shop' }));
+    assert.equal(grant.name, 'shop');
+    assert.equal(grant.nameProblem, undefined);
   });
 
   it('refuses a properly signed grant whose content is not JSON at all', () => {

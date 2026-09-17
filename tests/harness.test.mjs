@@ -94,6 +94,7 @@ describe('the stub workload', () => {
     t.after(() => workload.close());
 
     // A toy forwarder, NOT the real one: M5-4 writes that, in `src/`.
+    /** @type {import('../src/serve.mjs').Resolver} */
     const forward = async ({ req, res }) =>
       new Promise((resolve) => {
         const upstream = httpRequest(

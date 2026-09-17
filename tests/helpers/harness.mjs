@@ -109,7 +109,7 @@ export function requestGateway({ port, host, path = '/', method = 'GET', headers
  *
  * @param {{
  *   events?: object[], relays?: string[], domain?: string, tls?: boolean,
- *   http?: boolean, resolve?: Function, now?: () => number,
+ *   http?: boolean, resolve?: import('../../src/serve.mjs').Resolver, now?: () => number,
  *   env?: Record<string, string>, log?: (line: string) => void,
  * }} [options]
  */

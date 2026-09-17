@@ -9,8 +9,15 @@ import { schnorr } from '@noble/curves/secp256k1.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils.js';
 
-const isHex = (value, bytes) =>
+/** A lowercase-or-uppercase hex string of exactly `bytes` bytes. */
+export const isHex = (value, bytes) =>
   typeof value === 'string' && new RegExp(`^[0-9a-f]{${bytes * 2}}$`, 'i').test(value);
+
+/**
+ * A 32-byte hex identifier: a Nostr pubkey, an event id's worth of bytes, or a
+ * workload id — which are the same shape, and are checked in the same places.
+ */
+export const isKey32 = (value) => isHex(value, 32);
 
 /** The NIP-01 serialization an event's id is the SHA-256 of. */
 export function serializeEvent(event) {

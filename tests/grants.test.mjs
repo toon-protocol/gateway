@@ -3,7 +3,7 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 
-import { createGrantRegistry } from '../src/registry.mjs';
+import { createHeldGrants } from '../src/grants.mjs';
 import { canonicalLabel } from '../src/hostname.mjs';
 import { CONSTANTS, gatewayGrant } from './helpers/events.mjs';
 
@@ -12,7 +12,7 @@ const WORKLOAD = 'aa'.repeat(32);
 const OTHER = 'bb'.repeat(32);
 const label = canonicalLabel(WORKLOAD);
 
-const registry = (log = () => {}) => createGrantRegistry({ gatewayPubkey: GATEWAY, log });
+const registry = (log = () => {}) => createHeldGrants({ gatewayPubkey: GATEWAY, log });
 const grantFor = (overrides = {}) =>
   gatewayGrant({ workloadId: WORKLOAD, gateway: GATEWAY, ...overrides });
 
@@ -30,6 +30,15 @@ describe('offer', () => {
     assert.equal(grants.offer(grantFor({ gateway: 'cc'.repeat(32) })).accepted, false);
     assert.equal(grants.size, 0);
     assert.match(lines.join('\n'), /another gateway|not this gateway/i);
+  });
+
+  it('keeps serving a workload whose grant carried an unusable `name`', () => {
+    const lines = [];
+    const grants = registry((line) => lines.push(line));
+    assert.equal(grants.offer(grantFor({ name: 'not a label' })).accepted, true);
+    assert.equal(grants.find(label)?.workloadId, WORKLOAD, 'the canonical hostname survives');
+    assert.equal(grants.find(label)?.name, undefined);
+    assert.match(lines.join('\n'), /name/i);
   });
 
   it('ignores a malformed grant and keeps serving the rest, saying why', () => {
@@ -98,6 +107,19 @@ describe('replacement', () => {
     grants.offer(grantFor({ createdAt: 1700000100, gateway: 'cc'.repeat(32) }));
     assert.equal(grants.find(label), undefined, 'the tenant rotated away from this gateway');
     assert.equal(grants.size, 0);
+  });
+
+  it('does not let a replayed EARLIER grant undo a rotation away from here', () => {
+    // Several relays carry the same grant, so the earlier one arriving again
+    // after the rotation is ordinary — and must not put the workload back.
+    const grants = registry();
+    const mine = grantFor({ createdAt: 1700000000 });
+    grants.offer(mine);
+    grants.offer(grantFor({ createdAt: 1700000100, gateway: 'cc'.repeat(32) }));
+    assert.equal(grants.size, 0);
+    grants.offer(mine);
+    assert.equal(grants.size, 0, 'the rotation stands');
+    assert.equal(grants.find(label), undefined);
   });
 
   it('keeps a workload when an EARLIER grant named another gateway', () => {

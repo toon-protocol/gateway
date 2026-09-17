@@ -19,7 +19,10 @@ const OTHER_WORKLOAD = 'bb'.repeat(32);
 const grantFor = (overrides = {}) =>
   gatewayGrant({ workloadId: WORKLOAD, gateway: GATEWAY, ...overrides });
 
-/** A resolver that answers with what it was given, so a test can see it. */
+/**
+ * A resolver that answers with what it was given, so a test can see it.
+ * @type {import('../src/serve.mjs').Resolver}
+ */
 const echoGrant = async ({ grant, res }) => {
   res.writeHead(200, { 'content-type': 'application/json' });
   res.end(JSON.stringify({ workloadId: grant.workloadId, httpPort: grant.httpPort, name: grant.name ?? null }));
@@ -89,6 +92,36 @@ describe('grant discovery', () => {
     const answered = await gateway.get(gateway.hostFor(WORKLOAD));
     assert.equal(answered.status, 503);
     assert.equal(answered.headers['toon-gateway-reason'], 'no_grant');
+  });
+
+  it('never sees a rotation to another gateway on its own filter — that is M5-5', async (t) => {
+    // A grant rotating a workload away names the NEW gateway in its `p` tag
+    // (spec §3.1.3), so THIS gateway's `#p` filter does not carry it. The
+    // withdrawal rule itself is in place (`tests/grants.test.mjs`); what M5-5
+    // still has to add is a subscription that delivers such a grant — by `#d`
+    // on each held workload, or by the tenant as author.
+    const gateway = await startTestGateway({
+      events: [grantFor({ createdAt: 1700000000 })],
+      resolve: echoGrant,
+    });
+    t.after(() => gateway.close());
+
+    const host = gateway.hostFor(WORKLOAD);
+    gateway.publish(grantFor({ createdAt: 1700000100, gateway: 'cc'.repeat(32) }));
+    await new Promise((done) => setTimeout(done, 50));
+    assert.equal((await gateway.get(host)).status, 200, 'still served, because it was never seen');
+  });
+
+  it('keeps serving a workload whose grant carried an unusable name', async (t) => {
+    const gateway = await startTestGateway({
+      events: [grantFor({ name: 'not a label' })],
+      resolve: echoGrant,
+    });
+    t.after(() => gateway.close());
+
+    const answered = await gateway.get(gateway.hostFor(WORKLOAD));
+    assert.equal(answered.status, 200, 'the canonical hostname is not lost to a bad name');
+    assert.equal(answered.json().name, null);
   });
 
   it('keeps serving the others when a malformed grant arrives', async (t) => {

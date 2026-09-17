@@ -16,6 +16,7 @@ const GATEWAY = CONSTANTS.gateway.public_key;
 const WORKLOAD = 'aa'.repeat(32);
 const grantFor = () => gatewayGrant({ workloadId: WORKLOAD, gateway: GATEWAY });
 
+/** @type {import('../src/serve.mjs').Resolver} */
 const served = async ({ grant, res }) => {
   res.writeHead(200, { 'content-type': 'text/plain' });
   res.end(`served ${grant.workloadId}`);

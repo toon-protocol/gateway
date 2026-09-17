@@ -14,7 +14,7 @@ import { createServer as createHttpServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 
 import { K_GATEWAY_GRANT } from './kinds.mjs';
-import { createGrantRegistry } from './registry.mjs';
+import { createHeldGrants } from './grants.mjs';
 import { createRelayPool, grantFilter } from './relays.mjs';
 import { createRequestHandler, notResolved } from './serve.mjs';
 
@@ -32,7 +32,7 @@ const listen = (server, port, address) =>
  *
  * @param {{
  *   config: ReturnType<typeof import('./config.mjs').readConfig>,
- *   resolve?: Function,
+ *   resolve?: import('./serve.mjs').Resolver,
  *   pool?: ReturnType<typeof createRelayPool>,
  *   now?: () => number,
  *   log?: (line: string) => void,
@@ -41,11 +41,12 @@ const listen = (server, port, address) =>
 export async function startGateway({
   config,
   resolve = notResolved,
-  pool = createRelayPool({ log: (line) => log(line) }),
+  pool,
   now = () => Math.floor(Date.now() / 1000),
   log = () => {},
 }) {
-  const grants = createGrantRegistry({ gatewayPubkey: config.publicKey, log });
+  const relays = pool ?? createRelayPool({ log });
+  const grants = createHeldGrants({ gatewayPubkey: config.publicKey, log });
   const handler = createRequestHandler({ domain: config.domain, grants, resolve, now, log });
 
   /** Resolves the first time a relay has sent everything it already held. */
@@ -54,7 +55,7 @@ export async function startGateway({
     markCaughtUp = () => done(undefined);
   });
 
-  const subscription = pool.subscribe({
+  const subscription = relays.subscribe({
     relays: config.relays,
     filters: [grantFilter(config.publicKey, K_GATEWAY_GRANT)],
     onEvent: (event) => grants.offer(event),
@@ -97,7 +98,7 @@ export async function startGateway({
     /** The grants this gateway holds. */
     grants,
     /** The relay pool, so M5-5 can open its own Takeover subscriptions on it. */
-    pool,
+    pool: relays,
     httpPort,
     httpsPort,
     /** Resolves once some relay has replayed the grants it already held. */
@@ -105,7 +106,7 @@ export async function startGateway({
 
     async stop() {
       subscription.close();
-      pool.close();
+      relays.close();
       await Promise.all(
         servers.map(
           (server) =>

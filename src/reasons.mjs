@@ -5,10 +5,13 @@
 // closed connection or a bare 503. So every refusal this gateway makes names
 // a reason from ONE vocabulary, and the vocabulary lives in one table.
 //
-// EXTENDING IT: add a row to `REASONS` below (or call `defineReason` from the
-// module that raises it) and nothing else changes — the HTTP status, the JSON
-// shape, the HTML page and the header are all derived from the row. M5-4 adds
-// `no_running_member` and `member_unreachable`; M5-6 adds the missing proxy.
+// EXTENDING IT, two doors with one rule between them: add a row to `REASONS`
+// below when the reason is one this gateway owns — which is every reason so
+// far — and call `defineReason` only when the reason belongs beside the code
+// that raises it, in another module. Either way nothing else changes: the HTTP
+// status, the JSON shape, the HTML page and the header are all derived from
+// the row. M5-4 adds `no_running_member` and `member_unreachable`; M5-6 adds
+// the missing proxy.
 //
 // A row is `code -> (context) => message`. The context is whatever the caller
 // knows; a message that names the hostname or the workload id is worth far

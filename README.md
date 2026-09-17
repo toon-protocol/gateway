@@ -114,6 +114,17 @@ certificate — which is the point: a workload is reachable over HTTPS while
 holding no certificate itself, and no provider in the Standby Set ever sees a
 certificate key.
 
+## Its own connector
+
+ADR 0013 puts a gateway behind its own connector, like any other TOON app. In
+this milestone **that connector terminates no paid route**: nothing a tenant
+asks this process for is sold, and this process buys nothing either. It holds
+no payment channel, no mnemonic and no lease, and it never calls a paid route
+— so there is no connector configuration here to get wrong. What a deployment
+puts in front of these listeners (a connector, a load balancer, nothing at
+all) is its own choice, and the plain-HTTP listener is there for the case
+where TLS is terminated ahead of this process.
+
 ## The error page
 
 Until a workload resolves, and whenever it cannot, a request is answered `503`
@@ -146,7 +157,7 @@ unreachable*; M5-6 adds *no proxy configured*.
 | `src/config.mjs` | The configuration, and the refusal naming everything missing. |
 | `src/gateway.mjs` | The composition: listeners, the grant subscription, `stop()`. |
 | `src/serve.mjs` | The request path: hostname → grant → the resolver seam, and the refusals. |
-| `src/registry.mjs` | The grants held: one per workload, replacement, the hostname index. |
+| `src/grants.mjs` | The grants held: one per workload, replacement, the hostname index. |
 | `src/grant.mjs` | Reading one Gateway Grant event, or saying which field is wrong. |
 | `src/relays.mjs` | The relay pool: subscriptions that stay open, and the grant filter. |
 | `src/hostname.mjs` | The canonical label: base32, and reading a label out of a `Host`. |
@@ -200,19 +211,23 @@ request's hostname has been matched to a grant that is in force:
 ```js
 /**
  * @param {{ grant, req, res?, socket?, head?, secure }} context
- * @returns {Promise<{ served: true } | { unavailable: Unavailable }>}
+ * @returns {Promise<{ unavailable: Unavailable } | any>}
  */
 ```
 
-Returning `{ served: true }` means the resolver answered the request itself
-(M5-4 reverse-proxies to the running Standby Set member). Returning
-`{ unavailable }` — from `unavailable('<reason>', { … })` — answers the error
-page. A resolver that throws is logged and answered `not_resolved`, so a bug
-here is never a dropped connection. WebSocket upgrades arrive at the same
-resolver with `socket` and `head` in place of `res`.
+Returning `{ unavailable }` — from `unavailable('<reason>', { … })` — answers
+the error page. Returning **anything else, nothing included**, means the
+resolver answered the request itself: M5-4 forwards it to whichever Standby Set
+member is running the workload. A resolver that throws is logged and answered
+`not_resolved`, so a bug here is never a dropped connection. WebSocket upgrades
+arrive at the same resolver with `socket` and `head` in place of `res`.
 
 Without one, the gateway answers `not_resolved`: this milestone stops one step
 short of the workload on purpose.
 
-[adr13]: ../TOON_Network/docs/adr/0013-hostnames-and-tls-live-in-a-workload-gateway.md
-[hidden]: ../TOON_Network/docs/spec/toon-network-v1.md
+Spec and ADR references are to `toon-protocol/TOON_Network`:
+`docs/spec/toon-network-v1.md` and
+`docs/adr/0013-hostnames-and-tls-live-in-a-workload-gateway.md`.
+
+[adr13]: https://github.com/toon-protocol/TOON_Network/blob/main/docs/adr/0013-hostnames-and-tls-live-in-a-workload-gateway.md
+[hidden]: https://github.com/toon-protocol/TOON_Network/blob/main/docs/spec/toon-network-v1.md#10-hidden-provider

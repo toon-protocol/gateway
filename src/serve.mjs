@@ -15,6 +15,27 @@ import { labelUnder } from './hostname.mjs';
 import { renderUnavailable, unavailable } from './reasons.mjs';
 
 /**
+ * @typedef {{ reason: string, status: number, message: string }} Unavailable
+ */
+
+/**
+ * What to do with a request whose hostname names a workload this gateway holds
+ * a grant for. M5-4 is what fills it in.
+ *
+ * Returning `{ unavailable }` answers the error page. Returning ANYTHING else,
+ * nothing included, means the resolver answered the request itself.
+ *
+ * @typedef {(context: {
+ *   grant: ReturnType<typeof import('./grant.mjs').readGrant>,
+ *   req: import('node:http').IncomingMessage,
+ *   res?: import('node:http').ServerResponse,
+ *   socket?: import('node:stream').Duplex,
+ *   head?: Buffer,
+ *   secure: boolean,
+ * }) => Promise<{ unavailable: Unavailable } | any>} Resolver
+ */
+
+/**
  * The grant a request's Host names, or why there is none to serve.
  *
  * @returns {{ grant: object } | { unavailable: { reason: string, status: number, message: string } }}
@@ -41,31 +62,48 @@ export const notResolved = async ({ grant }) => ({
   unavailable: unavailable('not_resolved', { workloadId: grant.workloadId }),
 });
 
-/** Write one refusal as an ordinary HTTP response. */
+/**
+ * Write one refusal as an ordinary HTTP response.
+ *
+ * A resolver that failed AFTER it had begun answering leaves nothing to say a
+ * refusal in: the tenant has already been sent a status line. Ending the
+ * response is then the only honest thing, and a truncated body is what a
+ * reverse proxy gives in that position anyway.
+ */
+/**
+ * The headers of a refusal.
+ *
+ * `toon-gateway-reason` is there so a machine reading the answer needs no body
+ * parser, and so a log line through a CDN still says which reason it was.
+ */
+const refusalHeaders = (why, rendered) => ({
+  'content-type': rendered.contentType,
+  'content-length': String(Buffer.byteLength(rendered.body)),
+  'toon-gateway-reason': why.reason,
+  connection: 'close',
+});
+
 export function answerUnavailable(res, why, accept) {
+  if (res.headersSent) {
+    res.end();
+    return;
+  }
   const rendered = renderUnavailable(why, accept);
-  res.writeHead(rendered.status, {
-    'content-type': rendered.contentType,
-    'content-length': Buffer.byteLength(rendered.body),
-    // So a machine reading the answer needs no body parser, and a log line
-    // through a CDN still says which reason it was.
-    'toon-gateway-reason': why.reason,
-    connection: 'close',
-  });
+  res.writeHead(rendered.status, refusalHeaders(why, rendered));
   res.end(rendered.body);
 }
 
 /** Write one refusal onto a socket that asked to be upgraded. */
 export function refuseUpgrade(socket, why) {
+  if (!socket.writable) {
+    socket.destroy();
+    return;
+  }
   const rendered = renderUnavailable(why, '*/*');
-  socket.end(
-    `HTTP/1.1 ${rendered.status} Service Unavailable\r\n` +
-      `content-type: ${rendered.contentType}\r\n` +
-      `content-length: ${Buffer.byteLength(rendered.body)}\r\n` +
-      `toon-gateway-reason: ${why.reason}\r\n` +
-      'connection: close\r\n\r\n' +
-      rendered.body,
-  );
+  const headers = Object.entries(refusalHeaders(why, rendered))
+    .map(([name, value]) => `${name}: ${value}\r\n`)
+    .join('');
+  socket.end(`HTTP/1.1 ${rendered.status} Service Unavailable\r\n${headers}\r\n${rendered.body}`);
 }
 
 /**
@@ -74,7 +112,7 @@ export function refuseUpgrade(socket, why) {
  * @param {{
  *   domain: string,
  *   grants: { find: (label: string) => object | undefined },
- *   resolve?: Function,
+ *   resolve?: Resolver,
  *   now?: () => number,
  *   log?: (line: string) => void,
  * }} deps
@@ -94,7 +132,7 @@ export function createRequestHandler({
     }
     try {
       const outcome = await resolve({ ...context, grant: found.grant });
-      if (outcome !== undefined && 'unavailable' in outcome) refuse(outcome.unavailable);
+      if (outcome?.unavailable !== undefined) refuse(outcome.unavailable);
     } catch (e) {
       // A resolver that threw is a gateway fault, not a tenant's: say so
       // rather than dropping the connection, so it is tellable apart from a

@@ -12,6 +12,8 @@
 // unpadded — `=` is not a legal label character, and the padding carries
 // nothing, since the length of a workload id is fixed.
 
+import { isKey32 } from './nostr.mjs';
+
 const ALPHABET = 'abcdefghijklmnopqrstuvwxyz234567';
 
 /** RFC 4648 base32 of `bytes`, lowercase and unpadded. */
@@ -39,7 +41,7 @@ export function base32Lower(bytes) {
  * tenant can derive.
  */
 export function canonicalLabel(workloadId) {
-  if (typeof workloadId !== 'string' || !/^[0-9a-fA-F]{64}$/.test(workloadId)) {
+  if (!isKey32(workloadId)) {
     const got = typeof workloadId === 'string' ? JSON.stringify(workloadId) : typeof workloadId;
     throw new Error(`a workload id must be 64 hex characters (32 bytes), not ${got}`);
   }

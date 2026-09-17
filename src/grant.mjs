@@ -11,10 +11,7 @@
 // moves on, because one malformed grant must not stop the others being served.
 
 import { K_GATEWAY_GRANT } from './kinds.mjs';
-import { tagValue, verifyEvent } from './nostr.mjs';
-
-const isPubkey = (value) => typeof value === 'string' && /^[0-9a-f]{64}$/i.test(value);
-const isWorkloadId = isPubkey;
+import { isKey32, tagValue, verifyEvent } from './nostr.mjs';
 
 /** A single DNS label: what a readable `name` may be (shape only; M5-4 serves it). */
 const isLabel = (value) =>
@@ -57,7 +54,7 @@ export function readGrant(event) {
   const { workload_id: workloadId, gateway, http_port: httpPort, standby_set: standbySet } = content;
   const { expires_at: expiresAt, name } = content;
 
-  if (!isWorkloadId(workloadId)) {
+  if (!isKey32(workloadId)) {
     throw new Error('its `workload_id` is not 64 hex characters');
   }
   if (tagValue(event, 'd') !== workloadId) {
@@ -65,21 +62,25 @@ export function readGrant(event) {
       `its \`d\` tag (${tagValue(event, 'd')}) is not its \`workload_id\` (${workloadId})`,
     );
   }
-  if (!isPubkey(gateway)) {
+  if (!isKey32(gateway)) {
     throw new Error('its `gateway` is not a pubkey');
   }
   if (!Number.isInteger(httpPort) || httpPort < 1 || httpPort > 65535) {
     throw new Error(`its \`http_port\` is not a port: ${JSON.stringify(httpPort)}`);
   }
-  if (!Array.isArray(standbySet) || standbySet.length === 0 || !standbySet.every(isPubkey)) {
+  if (!Array.isArray(standbySet) || standbySet.length === 0 || !standbySet.every(isKey32)) {
     throw new Error('its `standby_set` is not a non-empty list of pubkeys');
   }
   if (!Number.isInteger(expiresAt)) {
     throw new Error(`its \`expires_at\` is not a unix time: ${JSON.stringify(expiresAt)}`);
   }
-  if (name !== undefined && !isLabel(name)) {
-    throw new Error(`its \`name\` is not a single DNS label: ${JSON.stringify(name)}`);
-  }
+  // A `name` is a convenience, not authority: a bad one costs the workload its
+  // readable hostname and nothing else. Throwing here would take the CANONICAL
+  // hostname down with it, which is the one a tenant can always derive.
+  const nameProblem =
+    name === undefined || isLabel(name)
+      ? undefined
+      : `its \`name\` is not a single DNS label and was dropped: ${JSON.stringify(name)}`;
 
   return {
     workloadId: workloadId.toLowerCase(),
@@ -87,7 +88,9 @@ export function readGrant(event) {
     httpPort,
     standbySet: standbySet.map((k) => k.toLowerCase()),
     expiresAt,
-    name,
+    name: nameProblem === undefined ? name : undefined,
+    /** Why the `name` was dropped, if there was one to drop. */
+    nameProblem,
     /** The tenant: the only signer a provider accepts a grant from (spec §6.5). */
     tenant: event.pubkey,
     /** The signed event, unmodified — this is what travels to a provider. */

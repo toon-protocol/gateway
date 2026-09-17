@@ -67,3 +67,19 @@ describe('defineReason', () => {
     assert.throws(() => defineReason('no_grant', () => 'something else'), /already/);
   });
 });
+
+describe('a refusal that arrives too late', () => {
+  it('ends the response rather than throwing, when the answer had already begun', async () => {
+    const { answerUnavailable, refuseUpgrade } = await import('../src/serve.mjs');
+
+    let ended = false;
+    const res = { headersSent: true, writeHead: () => assert.fail('nothing more can be written'), end: () => { ended = true; } };
+    answerUnavailable(/** @type {any} */ (res), unavailable('no_grant', { host: 'x' }), '*/*');
+    assert.equal(ended, true);
+
+    let destroyed = false;
+    const socket = { writable: false, end: () => assert.fail('nothing more can be written'), destroy: () => { destroyed = true; } };
+    refuseUpgrade(/** @type {any} */ (socket), unavailable('no_grant', { host: 'x' }));
+    assert.equal(destroyed, true);
+  });
+});

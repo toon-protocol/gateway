@@ -1,5 +1,9 @@
 // The grants this gateway holds, and the hostnames they are served at.
 //
+// Deliberately not called a registry: CONTEXT.md keeps "Registry" for the
+// Image Registry and warns it off the Provider Directory, and this is neither.
+// It is the set of grants held, which is the words the spec uses.
+//
 // A grant is addressable on its workload id (spec §3.1.3), so there is at most
 // ONE grant per workload here and publishing again replaces it: renewal,
 // rotation and a change of Standby Set are all the same act. Which of two
@@ -24,18 +28,17 @@ const supersedes = (candidate, held) =>
 /**
  * @param {{ gatewayPubkey: string, log?: (line: string) => void }} options
  */
-export function createGrantRegistry({ gatewayPubkey, log = () => {} }) {
+export function createHeldGrants({ gatewayPubkey, log = () => {} }) {
+  // The NEWEST grant seen per workload, whoever it names — including one that
+  // names another gateway. Forgetting those would let an older grant, replayed
+  // off a second relay, undo a tenant's rotation and put the workload back.
   /** @type {Map<string, ReturnType<typeof readGrant>>} workload id -> grant */
-  const held = new Map();
-  /** @type {Map<string, string>} hostname label -> workload id */
+  const newest = new Map();
+  /** @type {Map<string, string>} hostname label -> workload id, ours only */
   const labels = new Map();
 
   const ours = gatewayPubkey.toLowerCase();
-
-  const withdraw = (workloadId) => {
-    held.delete(workloadId);
-    for (const [label, id] of labels) if (id === workloadId) labels.delete(label);
-  };
+  const isOurs = (grant) => grant !== undefined && grant.gateway === ours;
 
   const ignore = (event, why) => {
     log(`ignored a grant${event?.id ? ` ${event.id}` : ''}: ${why}`);
@@ -58,27 +61,39 @@ export function createGrantRegistry({ gatewayPubkey, log = () => {} }) {
         return ignore(event, e instanceof Error ? e.message : String(e));
       }
 
-      const current = held.get(grant.workloadId);
-      if (current !== undefined && !supersedes(grant.event, current.event)) {
-        return ignore(event, `it does not supersede the grant held for ${grant.workloadId}`);
+      const current = newest.get(grant.workloadId);
+      if (current !== undefined && current.event.id === grant.event.id) {
+        // The same grant off a second relay: the ordinary case, not an event
+        // worth a log line — several relays carry the same grant on purpose.
+        return { accepted: false, why: 'already held' };
       }
+      if (current !== undefined && !supersedes(grant.event, current.event)) {
+        return ignore(event, `it does not supersede the grant known for ${grant.workloadId}`);
+      }
+
+      const label = canonicalLabel(grant.workloadId);
+      newest.set(grant.workloadId, grant);
 
       // A grant naming somebody else is how a tenant ROTATES away from this
       // gateway: the newest grant for a workload decides, and if it is not
       // ours we stop serving that workload rather than keep the old one.
-      if (grant.gateway !== ours) {
-        if (current !== undefined) {
-          withdraw(grant.workloadId);
+      //
+      // The rule is here; what does not exist yet is a subscription that
+      // DELIVERS such a grant. It names the new gateway in its `p` tag (spec
+      // §3.1.3), so the `#p` filter of §12.1 does not carry it — M5-5 adds the
+      // subscription that does, and this is what it will hand the grant to.
+      if (!isOurs(grant)) {
+        if (labels.delete(label)) {
           log(`workload ${grant.workloadId} was granted to another gateway; no longer served`);
         }
         return ignore(event, `it names another gateway (${grant.gateway})`);
       }
 
-      held.set(grant.workloadId, grant);
-      labels.set(canonicalLabel(grant.workloadId), grant.workloadId);
+      labels.set(label, grant.workloadId);
+      if (grant.nameProblem !== undefined) log(`grant ${grant.event.id}: ${grant.nameProblem}`);
       log(
         `holding a grant for workload ${grant.workloadId} at ` +
-          `${canonicalLabel(grant.workloadId)}, until ${new Date(grant.expiresAt * 1000).toISOString()}`,
+          `${label}, until ${new Date(grant.expiresAt * 1000).toISOString()}`,
       );
       return { accepted: true, grant };
     },
@@ -86,21 +101,17 @@ export function createGrantRegistry({ gatewayPubkey, log = () => {} }) {
     /** The grant served at one hostname label, or `undefined`. */
     find(label) {
       const workloadId = labels.get(label);
-      return workloadId === undefined ? undefined : held.get(workloadId);
+      return workloadId === undefined ? undefined : newest.get(workloadId);
     },
 
-    /** The grant held for a workload, or `undefined`. */
-    forWorkload(workloadId) {
-      return held.get(workloadId.toLowerCase());
-    },
-
-    /** Every grant held, for a resolver that works through them all. */
+    /** Every grant held for this gateway, for a resolver working through them. */
     all() {
-      return [...held.values()];
+      return [...labels.values()].map((workloadId) => newest.get(workloadId));
     },
 
+    /** How many workloads this gateway is serving. */
     get size() {
-      return held.size;
+      return labels.size;
     },
   };
 }
