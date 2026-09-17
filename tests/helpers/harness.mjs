@@ -13,8 +13,9 @@
 //          the running one; assert on `workload.requests[0].headers`.
 //   M5-5 — `relay.publish(takeover({...}))` mid-test; assert that forwarding
 //          moved, and not before the settle window.
-//   M5-6 — a stub SOCKS proxy in front of the stub connector and workload;
-//          assert every `.anyone` connection went through it.
+//   M5-6 — a stub SOCKS proxy (`stub-socks.mjs`) routing `.anyone` names to
+//          the stubs; assert every such connection went through it and
+//          nothing came any other way (`hidden.test.mjs`).
 
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';

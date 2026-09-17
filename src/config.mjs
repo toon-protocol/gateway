@@ -141,8 +141,9 @@ export function readConfig(env, { readFile = (p) => readFileSync(p, 'utf8') } = 
   // late this process may be in noticing that one has passed.
   const followTickMs = millis('GATEWAY_FOLLOW_TICK_MS', FOLLOW_TICK_MS);
 
-  // The proxy for `.anyone` hosts. Validated here so a deployment that meant
-  // to hide finds out at startup; M5-6 is what dials through it.
+  // The anon client every `.anyone` host is dialled through (`src/dial.mjs`).
+  // Validated here so a deployment that meant to front a Hidden Provider's
+  // workload finds out at startup, not at the first request that needs it.
   let socksProxy;
   if (env.TOON_SOCKS_PROXY !== undefined && env.TOON_SOCKS_PROXY !== '') {
     try {

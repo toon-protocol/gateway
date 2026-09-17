@@ -24,7 +24,7 @@
 
 import { request as httpRequest } from 'node:http';
 
-import { connectionOptions } from './dial.mjs';
+import { connectionOptions, refusalFor } from './dial.mjs';
 import { unavailable } from './reasons.mjs';
 
 /** Headers that belong to one hop and are never copied to the next. */
@@ -92,8 +92,12 @@ const settleOnce = (resolve) => {
   return finish;
 };
 
-/** The refusal a workload that will not answer becomes. */
+/**
+ * The refusal a workload that will not answer becomes — or, for a dial this
+ * gateway would not make at all, the refusal saying why not.
+ */
 const unreachable = (target, workloadId, e) =>
+  refusalFor(e, workloadId) ??
   unavailable('member_unreachable', {
     workloadId,
     member: target.member,
@@ -110,7 +114,7 @@ const unreachable = (target, workloadId, e) =>
  *   target: { host: string, port: number, member?: string },
  *   workloadId: string,
  *   secure: boolean,
- *   connect?: (host: string, port: number) => import('node:net').Socket | undefined,
+ *   connect?: import('./dial.mjs').Dial,
  *   agent?: import('node:http').Agent,
  * }} context
  */
@@ -179,7 +183,7 @@ const handshake = (answer) => {
  *   target: { host: string, port: number, member?: string },
  *   workloadId: string,
  *   secure: boolean,
- *   connect?: (host: string, port: number) => import('node:net').Socket | undefined,
+ *   connect?: import('./dial.mjs').Dial,
  * }} context
  */
 export function forwardUpgrade({ req, socket, head, target, workloadId, secure, connect }) {

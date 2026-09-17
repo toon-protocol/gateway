@@ -20,6 +20,7 @@
 
 import { K_PROFILE } from './kinds.mjs';
 import { verifyEvent } from './nostr.mjs';
+import { isAnyoneHost } from './dial.mjs';
 
 /**
  * Read one event as a Provider Profile, or throw saying which field is wrong.
@@ -46,6 +47,11 @@ export function readProfile(event) {
   }
 
   const { connector_url: connectorUrl, relays, liveness_cadence_s: cadence } = content;
+  const named = Array.isArray(relays) ? relays.filter((r) => typeof r === 'string') : [];
+  // A relay at an `.anyone` host is never dialled directly (spec §12.8), and
+  // this gateway reaches relays directly: so it is not one this gateway can
+  // watch, and it is kept apart rather than dropped silently.
+  const hiddenRelays = named.filter((url) => isAnyoneHost(relayHost(url)));
   if (typeof connectorUrl !== 'string' || connectorUrl === '') {
     throw new Error('its `connector_url` is missing: there is nowhere to ask this member anything');
   }
@@ -58,13 +64,24 @@ export function readProfile(event) {
   return {
     provider: event.pubkey,
     connectorUrl,
-    /** The provider's own Relay Set (spec §4), which may not be ours. */
-    relays: Array.isArray(relays) ? relays.filter((r) => typeof r === 'string') : [],
+    /** The provider's own Relay Set (spec §4), which may not be ours — less any relay at an `.anyone` host. */
+    relays: named.filter((url) => !hiddenRelays.includes(url)),
+    /** The relays this gateway will not watch: at `.anyone` hosts, never dialled directly. */
+    hiddenRelays,
     /** How often this provider republishes Liveness; the unit M5-5 counts in. */
     livenessCadenceS: Number.isInteger(cadence) && cadence > 0 ? cadence : undefined,
     event,
   };
 }
+
+/** The host a relay URL names, or the URL itself when it is not one. */
+const relayHost = (url) => {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
+  }
+};
 
 /** NIP-01 replacement for a replaceable event: later wins, a tie goes to the lower id. */
 const supersedes = (candidate, held) =>
@@ -110,6 +127,14 @@ export function createProfiles({ pool, relays, log = () => {} }) {
     }
     known.set(profile.provider, profile);
     arrived(profile.provider);
+
+    if (profile.hiddenRelays.length > 0 && held?.hiddenRelays.join(' ') !== profile.hiddenRelays.join(' ')) {
+      log(
+        `provider ${profile.provider} publishes to ${profile.hiddenRelays.join(', ')}: a relay at an ` +
+          '`.anyone` host is never dialled directly and this gateway reaches relays directly, so it is ' +
+          'not watched (spec \u00a712.8)',
+      );
+    }
 
     const unseen = profile.relays.filter((url) => /^wss?:\/\//.test(url) && !relayUrls.has(url));
     if (unseen.length > 0) {

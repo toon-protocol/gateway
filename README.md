@@ -107,6 +107,57 @@ the two connections joined, so an application that holds a connection open
 works behind a gateway. Nothing is required of the workload — no header to
 read, no path prefix, no agent inside it.
 
+## A workload on a Hidden Provider
+
+A Hidden Provider publishes no host: its connector is reachable only at an
+`.anyone` address, and so is every lease it runs (spec §10, ADR 0008). A
+workload on one gets a public URL here all the same, and its provider stays
+hidden, because **this gateway is an ordinary client of the per-lease
+`.anyone` address**: it dials one through its anon client — the `socks5h://`
+port of a running `anon` daemon, `TOON_SOCKS_PROXY` — and everything else
+about resolution and forwarding is unchanged (spec §12.8).
+
+**Both legs go through the same path**, [`src/dial.mjs`](src/dial.mjs), the
+one place either opens a connection:
+
+| Host | Dialled |
+|---|---|
+| A member's `connector_url` at an `.anyone` host | `status` goes through the proxy. |
+| A running member's `access.host` that is an `.anyone` name | The request is forwarded through the proxy. |
+| Anything else | Directly. |
+
+So a Standby Set mixing a public primary with a hidden standby works with no
+configuration beyond the proxy: each member is dialled the way its own
+address calls for, and nothing in the grant says which members are hidden.
+
+An `.anyone` name is **never resolved or dialled directly**, under any
+circumstances. The name goes to the proxy *as a name* — `socks5h`, under which
+the proxy resolves it at the far end of the circuit; plain `socks5`, under
+which this process would resolve it first, is refused at startup — and with
+**no proxy configured, a workload that needs one is refused with `no_proxy`**
+before anything is tried, rather than handed to a system resolver that would
+put a hidden service into a plaintext DNS query. That includes a relay a
+Profile names at an `.anyone` host: this process reaches relays directly, so
+such a relay is **not watched**, and the log says so. A `connector_url` at
+`https://` is spoken to over TLS on the circuit, exactly as a public one.
+
+Two things to know before pointing a hidden workload here:
+
+- **A circuit takes time.** Reaching a hidden service means the `anon` daemon
+  building a circuit to it, which routinely takes longer than a TCP connect.
+  The dial waits up to 120 s for one (the client's own figure), and
+  `GATEWAY_RESOLVE_TIMEOUT_MS` does not shorten that: it bounds the wait for
+  a member's *answer* once connected, not for the circuit. A hidden member's
+  first resolution is slower than a public one's; the target is kept
+  afterwards, so only the first request pays.
+- **What fronting one discloses.** This gateway reads every request it
+  fronts, hidden or not. Fronting a Hidden Provider's workload reveals **the
+  workload's existence and its traffic pattern — not the provider's
+  location**: the gateway is one more client of the per-lease address, and
+  learns nothing about where the provider is that the tenant's own client
+  would not (spec §12.8, ADR 0008). The tenant makes that choice by
+  publishing the grant.
+
 ## A readable name
 
 A grant may also carry a `name`. It is served at `<name>.<GATEWAY_DOMAIN>`
@@ -194,9 +245,9 @@ Environment only; there is no config file.
 | `GATEWAY_HTTPS_PORT` | `443` | Where TLS is terminated. |
 | `GATEWAY_HTTP_PORT` | — | A plain-HTTP listener, for development or for a deployment terminating TLS in front. Set it or the certificate pair, or this process refuses to start. |
 | `GATEWAY_BIND_ADDR` | `0.0.0.0` | What to listen on. |
-| `GATEWAY_RESOLVE_TIMEOUT_MS` | `3000` | How long resolution waits for anything it needs — a member's Profile off a relay, and that member's answer to `status`. Every member is asked at once, so this is the whole of what one slow member costs a tenant's first request. |
+| `GATEWAY_RESOLVE_TIMEOUT_MS` | `3000` | How long resolution waits for anything it needs — a member's Profile off a relay, and that member's answer to `status`. Every member is asked at once, so this is what one slow member costs a tenant's first request — plus, for a hidden member, the circuit build, which is bounded separately (see [A workload on a Hidden Provider](#a-workload-on-a-hidden-provider)). |
 | `GATEWAY_FOLLOW_TICK_MS` | `1000` | How often this process looks at the clock while following a workload. It decides **nothing**: a settle window and a Liveness cadence are counted in the grant's and the Profile's own seconds, and this is only how late it may be in noticing that one has passed. Tests set it to tens of milliseconds so a clock they control is noticed at once. |
-| `TOON_SOCKS_PROXY` | — | `socks5h://<host>:<port>` for `.anyone` hosts. Validated at startup; **dialled from M5-6**. The scheme must be `socks5h`: under plain `socks5` this process would resolve the destination itself, putting a hidden service into a plaintext DNS query. |
+| `TOON_SOCKS_PROXY` | — | `socks5h://<host>:<port>`: the SOCKS5 port of a running `anon` daemon, through which every `.anyone` host is dialled. Without it, a workload on a Hidden Provider is refused with `no_proxy`. The scheme must be `socks5h`: under plain `socks5` this process would resolve the destination itself, putting a hidden service into a plaintext DNS query. |
 
 Startup collects **every** missing or malformed key and refuses with all of
 them at once:
@@ -228,6 +279,15 @@ npm start
 GATEWAY_SECRET_KEY=<64 hex> \
 GATEWAY_DOMAIN=gw.example \
 GATEWAY_RELAYS=wss://relay.one,wss://relay.two \
+GATEWAY_TLS_CERT=/etc/tls/fullchain.pem \
+GATEWAY_TLS_KEY=/etc/tls/privkey.pem \
+npm start
+
+# fronting Hidden Providers too: .anyone hosts go through a running anon daemon
+TOON_SOCKS_PROXY=socks5h://127.0.0.1:9050 \
+GATEWAY_SECRET_KEY=<64 hex> \
+GATEWAY_DOMAIN=gw.example \
+GATEWAY_RELAYS=wss://relay.one \
 GATEWAY_TLS_CERT=/etc/tls/fullchain.pem \
 GATEWAY_TLS_KEY=/etc/tls/privkey.pem \
 npm start
@@ -292,6 +352,7 @@ page when a browser asks for one, and the reason is repeated in a
 | `not_resolved` | A grant is held, but where the workload runs is not known yet. |
 | `no_running_member` | Every member of the Standby Set answered, and none of them is running it. |
 | `member_unreachable` | A member that would answer for the workload cannot be reached — its connector, or the address it gave. |
+| `no_proxy` | The workload is on a Hidden Provider — its connector or its lease is at an `.anyone` address — and this gateway has no `TOON_SOCKS_PROXY` to reach one through. Nothing was tried. |
 
 A request to a hostname with no grant — an unknown label, the bare domain, a
 deeper name, or a name under somebody else's domain — **never reaches a
@@ -301,9 +362,13 @@ provider or a workload**: nothing is dialled at all.
 the first says nothing is running the workload, the second says this gateway
 cannot see what may well be running. A tenant acts on them differently.
 
+`no_proxy` is likewise its own reason and not `member_unreachable`: the first
+is a fact about this gateway's configuration, which its operator fixes, and
+the second is a fact about its reach.
+
 The vocabulary is one table, `REASONS` in [`src/reasons.mjs`](src/reasons.mjs).
 Add a row (or call `defineReason`) and the HTTP status, the JSON body, the
-HTML page and the header all follow. M5-6 adds *no proxy configured*.
+HTML page and the header all follow.
 
 ## What is here
 
@@ -321,7 +386,7 @@ HTML page and the header all follow. M5-6 adds *no proxy configured*.
 | `src/follow.mjs` | Following the workload: the Takeover watch, the settle window, the per-cadence re-ask, the rotation watch. |
 | `src/status.mjs` | One `status` request: signing it, where it is sent, reading the answer. |
 | `src/forward.mjs` | Forwarding: the headers, the answer, and WebSocket upgrades. |
-| `src/dial.mjs` | The one place a TCP connection is opened — and the one host it refuses. |
+| `src/dial.mjs` | The one place a TCP connection is opened: `.anyone` through the proxy, anything else directly, and the `no_proxy` refusal. |
 | `src/hostname.mjs` | The canonical label: base32, and reading a label out of a `Host`. |
 | `src/nostr.mjs` | NIP-01: serialize, id, verify, sign. |
 | `src/reasons.mjs` | The `503` vocabulary. |
@@ -337,7 +402,12 @@ npm run typecheck
 Everything is driven **at the gateway's own listening port**, in process,
 against a stub relay, stub provider connectors and stub workloads. Nothing
 asserts on what the gateway holds internally — a test written that way passes
-when the gateway is broken in exactly the way that matters.
+when the gateway is broken in exactly the way that matters. The exceptions
+are the pure seams with a table or a contract of their own (`reasons`,
+`config`, `dial`), and one deliberate look *outside* the gateway:
+`hidden.test.mjs` watches the process's `dns.lookup`, because "no `.anyone`
+name was ever resolved" is a fact about what left this process, not about
+what the gateway answered.
 
 [`tests/harness.test.mjs`](tests/harness.test.mjs) is the smallest working
 example of each piece; read it first.
@@ -358,7 +428,8 @@ gateway.publish(takeover({ workloadId }));   // mid-test, into the relay it watc
 | `tests/helpers/harness.mjs` | `startTestGateway`, `gateway.get(host)`, `gateway.publish(event)`, `hostFor`, `untilServed`, `untilReason`, `until`. |
 | `tests/helpers/stub-relay.mjs` | A NIP-01 relay: holds Profiles, grants and Takeover events; `publish` reaches subscriptions already open; replaces addressable events as a relay does. |
 | `tests/helpers/stub-connector.mjs` | A provider's connector answering `POST /status` (spec §6.5). `answerWith` to change the answer, `goSilent` for a member that never replies, `requests` for what it was asked and who signed it. |
-| `tests/helpers/stub-workload.mjs` | The tenant's application: records method, URL, headers and body, and echoes over WebSocket. |
+| `tests/helpers/stub-workload.mjs` | The tenant's application: records method, URL, headers, body and who connected, and echoes over WebSocket. |
+| `tests/helpers/stub-socks.mjs` | A SOCKS5 proxy standing in for the `anon` daemon: routes a name to a stub, records every destination it was asked for and where each onward connection left from — so a test can say every `.anyone` connection went through it and nothing came any other way. |
 | `tests/helpers/events.mjs` | Signed `gatewayGrant`, `providerProfile`, `takeover`, `liveness`, and `CONSTANTS` — the test-only keys and clock every wire fixture was generated in. |
 
 The wire fixtures in `tests/fixtures/wire/` are copied from the provider

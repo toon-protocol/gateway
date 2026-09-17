@@ -8,6 +8,8 @@
 import { createServer } from 'node:http';
 import { WebSocketServer } from 'ws';
 
+import { peerOf } from './peer.mjs';
+
 /**
  * @param {{
  *   body?: string | ((req: import('node:http').IncomingMessage) => string),
@@ -16,9 +18,9 @@ import { WebSocketServer } from 'ws';
  * }} [options]
  */
 export async function startStubWorkload({ body = 'hello from the workload', status = 200, websocket = true } = {}) {
-  /** @type {{ method: string, url: string, headers: Record<string, string>, body: string }[]} */
+  /** @type {{ method: string, url: string, headers: Record<string, string>, body: string, peer: { address: string, port: number } }[]} */
   const requests = [];
-  /** @type {{ url: string, headers: Record<string, string>, messages: string[] }[]} */
+  /** @type {{ url: string, headers: Record<string, string>, messages: string[], peer: { address: string, port: number } }[]} */
   const upgrades = [];
 
   const server = createServer((req, res) => {
@@ -30,6 +32,8 @@ export async function startStubWorkload({ body = 'hello from the workload', stat
         url: req.url ?? '',
         headers: /** @type {Record<string, string>} */ ({ ...req.headers }),
         body: Buffer.concat(chunks).toString('utf8'),
+        // Who connected: the gateway directly, or a proxy on its behalf (M5-6).
+        peer: peerOf(req),
       });
       const payload = typeof body === 'function' ? body(req) : body;
       res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' });
@@ -48,6 +52,7 @@ export async function startStubWorkload({ body = 'hello from the workload', stat
         url: req.url ?? '',
         headers: /** @type {Record<string, string>} */ ({ ...req.headers }),
         messages: /** @type {string[]} */ ([]),
+        peer: peerOf(req),
       };
       upgrades.push(record);
       socket.on('message', (raw) => {
