@@ -27,15 +27,19 @@
 // and the standby has not started. So the window is waited out, from the
 // event's `created_at` rather than from when this gateway happened to see it,
 // and the per-cadence re-ask of (2) is held off while it runs, for the same
-// reason and to the same end: the last known target keeps serving.
+// reason and to the same end: the last known target keeps serving. Because a
+// race settles on the EARLIEST claim, a second claimant may only bring that
+// deadline forward — so the wait is bounded by the first claim's window and
+// nobody can extend it by announcing again.
 //
 // WHAT IT DOES NOT DO. It never drops a target itself on the strength of a
 // Takeover or a cadence — only a FINISHED resolution changes or withdraws one
-// (`src/resolve.mjs`), so a slow relay, a slow connector or a member that will
-// not answer never takes a healthy workload offline. The two things it does
-// forget are a grant that ran out and a workload rotated to another gateway,
-// because in both cases this gateway has lost the authority to ask at all.
+// (`src/resolve.mjs`), so nothing here takes a healthy workload offline while
+// a slow relay or a slow member is still being waited for. The two things it
+// does forget are a grant that ran out and a workload rotated to another
+// gateway, because in both cases this gateway has lost the authority to ask.
 
+import { canonicalLabel } from './hostname.mjs';
 import { K_GATEWAY_GRANT, K_TAKEOVER } from './kinds.mjs';
 import { tagValue, verifyEvent } from './nostr.mjs';
 
@@ -82,18 +86,26 @@ export function createFollower({
   log = () => {},
   tickMs = FOLLOW_TICK_MS,
 }) {
-  /** The grants being followed, by workload id: what every decision here is about. */
-  /** @type {Map<string, any>} */
-  let held = new Map();
-  /** One Takeover subscription per workload, on that workload's primary's relays. */
-  /** @type {Map<string, { relays: string[], subscription: { close: () => void } }>} */
-  const takeovers = new Map();
-  /** Workload id -> when its settle window ends, while one is running. */
-  /** @type {Map<string, number>} */
-  const settling = new Map();
-  /** Takeover events already counted: several relays carry the same claim. */
-  /** @type {Set<string>} */
-  const claimed = new Set();
+  /**
+   * One record per workload followed, and everything about following it:
+   * the grant it is followed under, the Takeover watch open for it, the claim
+   * that opened its settle window and when that window ends.
+   *
+   * One map rather than four, because every one of these begins and ends
+   * together: a workload rotated away or a grant that ran out stops being
+   * followed in every one of these senses at the same moment.
+   *
+   * @typedef {{
+   *   grant: any,
+   *   relays: string[],
+   *   subscription: { close: () => void },
+   *   claims: Map<string, { id: string, createdAt: number }>,
+   *   settleDueAt?: number,
+   *   settledThrough: number,
+   * }} Followed
+   */
+  /** @type {Map<string, Followed>} workload id -> what is known about following it */
+  const following = new Map();
   /** The one subscription that can deliver a grant rotating a workload away. */
   /** @type {{ ids: string[], subscription: { close: () => void } } | null} */
   let rotation = null;
@@ -138,26 +150,43 @@ export function createFollower({
    * Without that check, anyone could publish a kind 30433 with this `d` and
    * hold up every re-ask for two cadences.
    */
-  const heard = (workloadId) => (event) => {
-    const grant = held.get(workloadId);
-    if (grant === undefined) return;
+  const onTakeover = (workloadId) => (event) => {
+    const followed = following.get(workloadId);
+    if (followed === undefined) return;
     if (event?.kind !== K_TAKEOVER || tagValue(event, 'd') !== workloadId) return;
-    if (claimed.has(event.id)) return;
+
+    // A claim is addressable on `(kind, pubkey, d)`, so each claimant has at
+    // most one: the same claim off a second relay, and one a relay replays
+    // after that claimant published a later claim, are both ordinary.
+    const last = followed.claims.get(event.pubkey);
+    if (last !== undefined && (last.id === event.id || event.created_at <= last.createdAt)) return;
+    // A claim from a race already settled here must not open a window again:
+    // relays replay, and this gateway may have restarted.
+    if (event.created_at <= followed.settledThrough) return;
+
     if (!verifyEvent(event)) {
       log(`ignored a Takeover for workload ${workloadId}: its id or signature does not verify`);
       return;
     }
-    if (!grant.standbySet.includes(event.pubkey)) {
+    if (!followed.grant.standbySet.includes(event.pubkey)) {
       log(
         `ignored a Takeover claim for workload ${workloadId}: it is signed by ${event.pubkey}, ` +
           'which the grant\'s `standby_set` does not name',
       );
       return;
     }
-    claimed.add(event.id);
-    const cadence = cadenceOf(grant);
+
+    const cadence = cadenceOf(followed.grant);
     const dueAt = event.created_at + 2 * cadence;
-    settling.set(workloadId, dueAt);
+    followed.claims.set(event.pubkey, { id: event.id, createdAt: event.created_at });
+    // THE EARLIEST CLAIM DECIDES. §7.1 settles a race on the earliest
+    // `created_at`, so the member that will be running the workload is the one
+    // whose window ends first: a second claimant, and a second round, can only
+    // bring this gateway's deadline forward, never push it out. Otherwise a
+    // standby announcing late would hold a stale target past the winner's
+    // start — and hold up the per-cadence re-ask with it.
+    if (followed.settleDueAt !== undefined && followed.settleDueAt <= dueAt) return;
+    followed.settleDueAt = dueAt;
     log(
       `workload ${workloadId}: ${event.pubkey} claims it. Its settle window of 2 x ${cadence} s ` +
         `ends at ${new Date(dueAt * 1000).toISOString()}; the Standby Set is asked again then, ` +
@@ -191,62 +220,66 @@ export function createFollower({
   /** Follow what is held now: the grants, their Takeover watches, the rotations. */
   const sync = () => {
     if (closed) return;
-    held = new Map(
+    const at = now();
+    /** @type {Map<string, any>} */
+    const held = new Map(
       grants
         .all()
-        .filter((grant) => grant !== undefined)
+        .filter((grant) => grant !== undefined && grant.inForceAt(at))
         .map((grant) => [grant.workloadId, grant]),
     );
-    const at = now();
 
     // A workload rotated away, or a grant that ran out: this gateway may no
     // longer read that lease, so it stops watching, stops asking, and forgets
     // where the workload was. An expired grant is not carried to a provider,
     // which would refuse it `bad_grant` (spec §6.5) and rightly.
-    for (const [workloadId, watch] of takeovers) {
-      const grant = held.get(workloadId);
-      if (grant !== undefined && grant.inForceAt(at)) continue;
-      watch.subscription.close();
-      takeovers.delete(workloadId);
-      settling.delete(workloadId);
+    for (const [workloadId, followed] of following) {
+      if (held.has(workloadId)) continue;
+      followed.subscription.close();
+      following.delete(workloadId);
       if (resolver.forget(workloadId)) {
         log(
           `workload ${workloadId} is no longer served: ${
-            grant === undefined ? 'its grant names another gateway' : 'its grant expired'
+            grants.find(canonicalLabel(workloadId)) === undefined
+              ? 'its grant names another gateway'
+              : 'its grant expired'
           }. Forgetting where it was running`,
         );
       }
     }
 
-    /** @type {string[]} */
-    const following = [];
     for (const grant of held.values()) {
-      if (!grant.inForceAt(at)) continue;
-      following.push(grant.workloadId);
       // The primary's Profile is where both the Relay Set and the cadence come
       // from, so it is watched whether or not a request has ever arrived.
       profiles.watch(grant.standbySet);
 
       const want = relaySetOf(grant);
-      const watch = takeovers.get(grant.workloadId);
-      if (watch !== undefined && sameList(watch.relays, want)) continue;
-      watch?.subscription.close();
-      takeovers.set(grant.workloadId, {
+      const followed = following.get(grant.workloadId);
+      if (followed !== undefined) {
+        followed.grant = grant;
+        if (sameList(followed.relays, want)) continue;
+        followed.subscription.close();
+      }
+      following.set(grant.workloadId, {
+        claims: new Map(),
+        settledThrough: 0,
+        ...followed,
+        grant,
         relays: want,
         subscription: pool.subscribe({
           relays: want,
           filters: [{ kinds: [K_TAKEOVER], '#d': [grant.workloadId] }],
-          onEvent: heard(grant.workloadId),
+          onEvent: onTakeover(grant.workloadId),
         }),
       });
       log(`workload ${grant.workloadId}: watching ${want.join(', ')} for a Takeover`);
     }
 
-    syncRotation(following.sort());
+    syncRotation([...following.keys()].sort());
   };
 
   /** Re-sync after the events of one turn, rather than once per event. */
-  const soon = () => {
+  const scheduleSync = () => {
     if (queued || closed) return;
     queued = true;
     queueMicrotask(() => {
@@ -264,29 +297,32 @@ export function createFollower({
    */
   const offer = (event) => {
     const outcome = grants.offer(event);
-    soon();
+    scheduleSync();
     return outcome;
   };
 
   const tick = () => {
     sync();
     const at = now();
-    for (const grant of held.values()) {
-      if (!grant.inForceAt(at)) continue;
-      const due = settling.get(grant.workloadId);
-      if (due !== undefined) {
+    for (const [workloadId, followed] of following) {
+      if (followed.settleDueAt !== undefined) {
         // Inside a settle window nothing else re-asks either: the standby has
         // not started the workload yet, so a round of `status` now could only
         // find nothing running and drop a target that is about to be replaced.
-        if (at < due) continue;
-        settling.delete(grant.workloadId);
-        log(`workload ${grant.workloadId}: its settle window has passed; asking the Standby Set again`);
-        reask(grant, 'a Takeover settled');
+        if (at < followed.settleDueAt) continue;
+        followed.settleDueAt = undefined;
+        // Nothing this window was opened on reopens it, however often a relay
+        // replays it: the race it belonged to has been settled here.
+        for (const claim of followed.claims.values()) {
+          followed.settledThrough = Math.max(followed.settledThrough, claim.createdAt);
+        }
+        log(`workload ${workloadId}: its settle window has passed; asking the Standby Set again`);
+        reask(followed.grant, 'a Takeover settled');
         continue;
       }
-      const target = resolver.current(grant.workloadId);
-      if (target !== undefined && at - target.at >= cadenceOf(grant)) {
-        reask(grant, 'a Liveness cadence has passed');
+      const target = resolver.current(workloadId);
+      if (target !== undefined && at - target.at >= cadenceOf(followed.grant)) {
+        reask(followed.grant, 'a Liveness cadence has passed');
       }
     }
   };
@@ -307,13 +343,10 @@ export function createFollower({
       closed = true;
       if (timer !== null) clearInterval(timer);
       timer = null;
-      for (const watch of takeovers.values()) watch.subscription.close();
-      takeovers.clear();
+      for (const followed of following.values()) followed.subscription.close();
+      following.clear();
       rotation?.subscription.close();
       rotation = null;
-      settling.clear();
-      claimed.clear();
-      held = new Map();
     },
   };
 }

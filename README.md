@@ -130,7 +130,10 @@ answer true, and a fourth stops it being asked at all (spec §12.7).
 kind `30433` with `#d` the workload id on the **primary's Relay Set** — the
 `relays` of `standby_set[0]`'s Provider Profile, which need not be a relay it
 is configured with. A claim that does not verify, or that is signed by a key
-the grant's `standby_set` does not name, is ignored.
+the grant's `standby_set` does not name, is ignored. Where several members
+claim the same workload, the **earliest** claim decides, as it does for the
+standbys themselves: a later claimant can only bring the deadline forward,
+never push it out.
 
 **The settle window.** A Takeover event does not mean the workload has moved:
 it means a standby announced that it *intends* to take it, and spec §7.1 gives
@@ -143,14 +146,20 @@ nothing running.
 
 **A Liveness cadence.** Independently of any event, the Standby Set is asked
 again once per `liveness_cadence_s` while a target is held, because a
-self-stop, an expiry and an eviction announce nothing to a gateway. That
-re-ask waits while a settle window is running, for the reason above.
+self-stop, an expiry and an eviction announce nothing to a gateway. A primary
+whose Profile states no `liveness_cadence_s` — a defective Profile, spec §4.1
+requires one — is followed at an assumed 60 s rather than not followed: that
+is the provider's doing, and the tenant would pay for it. The re-ask waits
+while a settle window is running, for the reason above, and no longer than the
+window itself.
 
 **The last known target keeps serving.** While a re-resolution is in flight,
 requests keep going to the member last seen running; only a *finished*
-resolution moves the target or withdraws it. A slow relay, a slow connector or
-a member that will not answer costs the freshness of the answer, never the
-service.
+resolution moves the target or withdraws it. So a slow relay, a slow connector
+or a member that is taking its time costs the freshness of the answer and not
+the service — for as long as the resolution is in flight. A resolution that
+finished and learned nothing does withdraw the target, and says which of the
+two reasons it was.
 
 Two things stop a workload being served at all, with nothing for an operator
 to do: a grant that passes its `expires_at` (`grant_expired`, and the grant is
@@ -386,7 +395,6 @@ works at:
 | `resolver.forget(workloadId)` | Stop serving that target. |
 | `gateway.profiles.get(pubkey)` | A member's `connectorUrl`, its `relays` and its `livenessCadenceS`. |
 | `gateway.pool.subscribe({…})` | Open another relay subscription. |
-| `gateway.follower` | Following the workload: `offer(event)` for a grant event, `start()`, `close()`. |
 
 Spec and ADR references are to `toon-protocol/TOON_Network`:
 `docs/spec/toon-network-v1.md` and

@@ -14,6 +14,7 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 
+import { DEFAULT_LIVENESS_CADENCE_S } from '../src/follow.mjs';
 import { CONSTANTS, gatewayGrant, providerProfile, takeover } from './helpers/events.mjs';
 import { startTestGateway, until } from './helpers/harness.mjs';
 import { running, startStubConnector } from './helpers/stub-connector.mjs';
@@ -70,7 +71,7 @@ async function member(t, key, { body, relays = [], cadence = CADENCE, state = 'r
   const connector = await startStubConnector({ pubkey: key.public_key });
   t.after(() => connector.close());
 
-  const it = {
+  const stub = {
     connector,
     workload,
     profile: providerProfile({
@@ -96,9 +97,9 @@ async function member(t, key, { body, relays = [], cadence = CADENCE, state = 'r
     ended: () => connector.answerWith(ENDED),
     silent: (value = true) => connector.goSilent(value),
   };
-  if (state === 'running') it.runs();
-  else it.reserved();
-  return it;
+  if (state === 'running') stub.runs();
+  else stub.reserved();
+  return stub;
 }
 
 /** A grant for a two-member Standby Set, primary first. */
@@ -216,6 +217,50 @@ describe('a Takeover', () => {
     });
   });
 
+  it('opens one settle window for a claim several relays carry', async (t) => {
+    // A Relay Set is several relays on purpose, so the same claim arrives
+    // more than once. A second copy must not push the deadline out.
+    const one = await startStubRelay({});
+    const two = await startStubRelay({});
+    for (const relay of [one, two]) t.after(() => relay.close());
+
+    const primary = await member(t, PRIMARY, {
+      body: 'the primary\'s copy',
+      relays: [one.url, two.url],
+      state: 'running',
+    });
+    const standby = await member(t, STANDBY, { body: 'the standby\'s copy' });
+
+    let clock = CONSTANTS.now;
+    const gateway = await startTestGateway({
+      events: [grantFor(), primary.profile, standby.profile],
+      now: () => clock,
+      env: FOLLOWS_FAST,
+    });
+    t.after(() => gateway.close());
+
+    const host = gateway.hostFor(WORKLOAD);
+    assert.equal((await gateway.get(host)).body, 'the primary\'s copy');
+
+    const claim = takeover({ standbySecret: STANDBY.secret_key, workloadId: WORKLOAD });
+    one.publish(claim);
+    two.publish(claim);
+    await untilLogged(gateway, /settle window/);
+    await new Promise((done) => setTimeout(done, 100));
+    assert.equal(
+      gateway.log.filter((line) => line.includes('settle window')).length,
+      1,
+      'the same claim off two relays is one claim',
+    );
+
+    primary.stopped();
+    standby.runs();
+    clock = CONSTANTS.now + SETTLE;
+    await until(async () => (await gateway.get(host)).body === 'the standby\'s copy', {
+      what: 'the URL to move once, at the one deadline',
+    });
+  });
+
   it('ignores a claim signed by a key the grant does not name', async (t) => {
     const theirs = await startStubRelay({});
     t.after(() => theirs.close());
@@ -242,12 +287,112 @@ describe('a Takeover', () => {
     // Standby Set may claim the workload (spec §7.1), so this one changes
     // nothing — and in particular does not hold up the per-cadence re-ask.
     theirs.publish(takeover({ standbySecret: STRANGER.secret_key, workloadId: WORKLOAD }));
-    await untilLogged(gateway, /claim|Takeover/i);
-    assert.ok(
-      !gateway.log.some((line) => line.includes('settle window')),
-      `no settle window was opened; the log was:\n${gateway.log.join('\n')}`,
-    );
+    await untilLogged(gateway, /ignored a Takeover claim/);
+
+    // The proof that no window was opened is not the absence of a log line:
+    // it is that the per-cadence re-ask still happens on time, which a window
+    // would have held up.
+    const askedBefore = primary.asked;
+    clock = CONSTANTS.now + CADENCE + 1;
+    await until(() => primary.asked > askedBefore, {
+      what: 'the per-cadence re-ask, which a settle window would have held up',
+    });
     assert.equal((await gateway.get(host)).body, 'the primary\'s copy');
+  });
+
+  it('takes the EARLIEST claim\'s deadline, so a late claimant cannot push it out', async (t) => {
+    const theirs = await startStubRelay({});
+    t.after(() => theirs.close());
+
+    // Both standbys claim the workload. §7.1 settles that race on the earliest
+    // `created_at`, so the winner starts at the earliest claim's deadline.
+    const primary = await member(t, PRIMARY, {
+      body: 'the primary\'s copy',
+      relays: [theirs.url],
+      state: 'running',
+    });
+    const standby = await member(t, STANDBY, { body: 'the standby\'s copy' });
+    const third = await member(t, CONSTANTS.provider, { body: 'the third member\'s copy' });
+
+    let clock = CONSTANTS.now;
+    const gateway = await startTestGateway({
+      events: [
+        grantFor({
+          standbySet: [PRIMARY.public_key, STANDBY.public_key, CONSTANTS.provider.public_key],
+        }),
+        primary.profile,
+        standby.profile,
+        third.profile,
+      ],
+      now: () => clock,
+      env: FOLLOWS_FAST,
+    });
+    t.after(() => gateway.close());
+
+    const host = gateway.hostFor(WORKLOAD);
+    assert.equal((await gateway.get(host)).body, 'the primary\'s copy');
+
+    theirs.publish(takeover({ standbySecret: STANDBY.secret_key, workloadId: WORKLOAD }));
+    await untilLogged(gateway, /settle window/);
+
+    // A second claimant, 40 s later. It loses the race (§7.1 settles on the
+    // earliest `created_at`), so the workload starts at the FIRST claim's
+    // deadline; a gateway that took the newest claim's would wait 40 s too
+    // long, holding a stale target and the cadence re-ask with it.
+    theirs.publish(
+      takeover({
+        standbySecret: CONSTANTS.provider.secret_key,
+        workloadId: WORKLOAD,
+        createdAt: CONSTANTS.now + 40,
+      }),
+    );
+    await new Promise((done) => setTimeout(done, 100));
+
+    primary.stopped();
+    standby.runs();
+    clock = CONSTANTS.now + SETTLE;
+    await until(async () => (await gateway.get(host)).body === 'the standby\'s copy', {
+      what: 'the URL to move at the EARLIEST claim\'s deadline',
+    });
+  });
+
+  it('asks again at once for a claim whose window has already passed', async (t) => {
+    const theirs = await startStubRelay({});
+    t.after(() => theirs.close());
+
+    const primary = await member(t, PRIMARY, {
+      body: 'the primary\'s copy',
+      relays: [theirs.url],
+      state: 'running',
+    });
+    const standby = await member(t, STANDBY, { body: 'the standby\'s copy', state: 'running' });
+
+    const clock = CONSTANTS.now;
+    const gateway = await startTestGateway({
+      events: [grantFor(), primary.profile, standby.profile],
+      now: () => clock,
+      env: FOLLOWS_FAST,
+    });
+    t.after(() => gateway.close());
+
+    const host = gateway.hostFor(WORKLOAD);
+    assert.equal((await gateway.get(host)).body, 'the primary\'s copy');
+
+    // A claim a slow relay delivered late, or one a restarted gateway is only
+    // now reading: the window is counted from the event's `created_at`, so it
+    // is already over and there is nothing left to wait for. The clock never
+    // moves in this test.
+    primary.stopped();
+    theirs.publish(
+      takeover({
+        standbySecret: STANDBY.secret_key,
+        workloadId: WORKLOAD,
+        createdAt: CONSTANTS.now - SETTLE,
+      }),
+    );
+    await until(async () => (await gateway.get(host)).body === 'the standby\'s copy', {
+      what: 'the URL to move with no clock movement at all',
+    });
   });
 });
 
@@ -323,6 +468,39 @@ describe('the per-cadence re-ask', () => {
     await primary.workload.close();
     clock = CONSTANTS.now + CADENCE + 1;
     await gateway.untilReason(host, 'member_unreachable');
+  });
+});
+
+describe('a primary Profile that states no cadence', () => {
+  it('is followed anyway, at the cadence a gateway assumes', async (t) => {
+    // `liveness_cadence_s` is a required Profile field (spec §4.1), so this
+    // Profile is defective — but that is the provider's doing, and refusing to
+    // follow the workload would charge the tenant for it.
+    const primary = await member(t, PRIMARY, {
+      body: 'the primary\'s copy',
+      cadence: null,
+      state: 'running',
+    });
+
+    let clock = CONSTANTS.now;
+    const gateway = await startTestGateway({
+      events: [grantFor({ standbySet: [PRIMARY.public_key] }), primary.profile],
+      now: () => clock,
+      env: FOLLOWS_FAST,
+    });
+    t.after(() => gateway.close());
+
+    const host = gateway.hostFor(WORKLOAD);
+    assert.equal((await gateway.get(host)).status, 200);
+
+    const askedBefore = primary.asked;
+    clock = CONSTANTS.now + 30;
+    await new Promise((done) => setTimeout(done, 100));
+    assert.equal(primary.asked, askedBefore, 'half a minute is not a cadence');
+
+    primary.stopped();
+    clock = CONSTANTS.now + DEFAULT_LIVENESS_CADENCE_S + 1;
+    await gateway.untilReason(host, 'no_running_member');
   });
 });
 

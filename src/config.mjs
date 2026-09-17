@@ -40,6 +40,17 @@ export function readConfig(env, { readFile = (p) => readFileSync(p, 'utf8') } = 
   /** @type {string[]} */
   const problems = [];
 
+  /** A duration in milliseconds, or the default, or a named problem. */
+  const millis = (key, fallback) => {
+    if (env[key] === undefined) return fallback;
+    const parsed = Number(env[key]);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      problems.push(`${key} is not a number of milliseconds: ${JSON.stringify(env[key])}`);
+      return fallback;
+    }
+    return parsed;
+  };
+
   const secretKey = env.GATEWAY_SECRET_KEY;
   let publicKey = null;
   if (!secretKey) {
@@ -122,35 +133,13 @@ export function readConfig(env, { readFile = (p) => readFileSync(p, 'utf8') } = 
   // Profile off a relay, and that member's answer to `status`. It bounds a
   // tenant's wait, because every member is asked at once — one slow member
   // costs this and no more.
-  let resolveTimeoutMs = RESOLVE_TIMEOUT_MS;
-  if (env.GATEWAY_RESOLVE_TIMEOUT_MS !== undefined) {
-    const parsed = Number(env.GATEWAY_RESOLVE_TIMEOUT_MS);
-    if (!Number.isInteger(parsed) || parsed < 1) {
-      problems.push(
-        'GATEWAY_RESOLVE_TIMEOUT_MS is not a number of milliseconds: ' +
-          JSON.stringify(env.GATEWAY_RESOLVE_TIMEOUT_MS),
-      );
-    } else {
-      resolveTimeoutMs = parsed;
-    }
-  }
+  const resolveTimeoutMs = millis('GATEWAY_RESOLVE_TIMEOUT_MS', RESOLVE_TIMEOUT_MS);
 
   // How often the gateway looks at the clock while following a workload (spec
   // §12.7). It decides NOTHING: a settle window and a Liveness cadence are
   // counted in the grant's and the Profile's own seconds, and this is only how
   // late this process may be in noticing that one has passed.
-  let followTickMs = FOLLOW_TICK_MS;
-  if (env.GATEWAY_FOLLOW_TICK_MS !== undefined) {
-    const parsed = Number(env.GATEWAY_FOLLOW_TICK_MS);
-    if (!Number.isInteger(parsed) || parsed < 1) {
-      problems.push(
-        'GATEWAY_FOLLOW_TICK_MS is not a number of milliseconds: ' +
-          JSON.stringify(env.GATEWAY_FOLLOW_TICK_MS),
-      );
-    } else {
-      followTickMs = parsed;
-    }
-  }
+  const followTickMs = millis('GATEWAY_FOLLOW_TICK_MS', FOLLOW_TICK_MS);
 
   // The proxy for `.anyone` hosts. Validated here so a deployment that meant
   // to hide finds out at startup; M5-6 is what dials through it.

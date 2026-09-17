@@ -145,14 +145,12 @@ export async function startGateway({
     config,
     /** The grants this gateway holds. */
     grants,
-    /** The relay pool, so M5-5 can open its own Takeover subscriptions on it. */
+    /** The relay pool, which every subscription this gateway holds is opened on. */
     pool: relays,
     /** The Standby Set members' Profiles: connectors, Relay Sets, cadences. */
     profiles,
     /** Resolution: `resolveNow`, `current`, `forget`. */
     resolver,
-    /** Following the workload: the Takeover watch and the per-cadence re-ask. */
-    follower,
     httpPort,
     httpsPort,
     /** Resolves once some relay has replayed the grants it already held. */
