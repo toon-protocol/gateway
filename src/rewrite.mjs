@@ -28,21 +28,31 @@
 import { connect as netConnect } from 'node:net';
 
 /**
- * One side of a rewrite: `host` or `host:port`, an IPv6 host in brackets.
+ * One side of a rewrite. A `port` of `undefined` means "whatever port was
+ * asked for": on the advertised side it matches any port of that host, on the
+ * dialled side it keeps the port of the dial.
  *
- * @returns {{ host: string, port: number | undefined }}
+ * @typedef {{ host: string, port: number | undefined }} Endpoint
  */
-function endpoint(text, what) {
+
+/**
+ * Read one side of a rewrite: `host` or `host:port`, an IPv6 host in brackets.
+ *
+ * @param {unknown} text
+ * @param {string} described  names the entry in the refusal, e.g. `GATEWAY_DIAL_REWRITE key "a"`
+ * @returns {Endpoint}
+ */
+function endpoint(text, described) {
   if (typeof text !== 'string' || text.trim() === '') {
-    throw new Error(`${what} must be a host or host:port, not ${JSON.stringify(text)}`);
+    throw new Error(`${described} must be a host or host:port, not ${JSON.stringify(text)}`);
   }
   const value = text.trim();
   const match = value.match(/^(\[[^\]]+\]|[^:]+)(?::(\d{1,5}))?$/);
-  if (match === null) throw new Error(`${what} is not a host or host:port: ${JSON.stringify(text)}`);
+  if (match === null) throw new Error(`${described} is not a host or host:port: ${JSON.stringify(text)}`);
   const host = match[1].replace(/^\[|\]$/g, '').toLowerCase();
   const port = match[2] === undefined ? undefined : Number(match[2]);
   if (port !== undefined && (port < 1 || port > 65535)) {
-    throw new Error(`${what} names a port that is not one: ${JSON.stringify(text)}`);
+    throw new Error(`${described} names a port that is not one: ${JSON.stringify(text)}`);
   }
   return { host, port };
 }
@@ -51,8 +61,7 @@ function endpoint(text, what) {
  * Read `GATEWAY_DIAL_REWRITE`, or throw saying what is wrong with it.
  *
  * @param {string} text  the environment value, a JSON object
- * @returns {Map<string, { host: string, port: number | undefined }>}
- *   keyed by `host` or `host:port`, lowercase
+ * @returns {Map<string, Endpoint>}  keyed by `host` or `host:port`, lowercase
  */
 export function readDialRewrites(text) {
   let parsed;
@@ -78,7 +87,7 @@ export function readDialRewrites(text) {
  * is one, else the bare `host` entry, else itself. A target with no port keeps
  * the port that was asked for.
  *
- * @param {Map<string, { host: string, port: number | undefined }>} rewrites
+ * @param {Map<string, Endpoint>} rewrites
  * @returns {{ host: string, port: number }}
  */
 export function rewriteTarget(rewrites, host, port) {
@@ -100,7 +109,7 @@ export function rewriteTarget(rewrites, host, port) {
  *
  * @template {{ connect: (host: string, port: number) => import('node:net').Socket | undefined }} D
  * @param {D} dialer
- * @param {Map<string, { host: string, port: number | undefined }>} rewrites
+ * @param {Map<string, Endpoint>} rewrites
  * @returns {D}
  */
 export function withDialRewrites(dialer, rewrites) {

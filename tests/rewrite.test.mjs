@@ -70,6 +70,9 @@ describe('withDialRewrites', () => {
     }
   });
 
+  // Written against the M5-4 dialler, which refuses every `.anyone` host by
+  // name; once TOON_Network #52 dials them through the proxy, the first
+  // assertion becomes "is handed to the proxy" and the second stays as it is.
   it('still refuses an .anyone host, unless that host is the one rewritten', () => {
     const dialer = withDialRewrites(createDialer(), readDialRewrites('{"x.anyone:80":"127.0.0.1:1"}'));
     assert.throws(() => dialer.connect('y.anyone', 80), /\.anyone/);
