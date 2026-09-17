@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs';
 import { validateSocks5hUrl } from '@toon-protocol/client';
 
 import { publicKeyOf } from './nostr.mjs';
+import { STATUS_TIMEOUT_MS } from './status.mjs';
 
 const DEFAULT_HTTPS_PORT = 443;
 
@@ -116,6 +117,21 @@ export function readConfig(env, { readFile = (p) => readFileSync(p, 'utf8') } = 
     );
   }
 
+  // How long a Standby Set member has to answer `status` before it counts as
+  // unreachable (spec \u00a76.5, \u00a712). It bounds a tenant's wait: every member is
+  // asked at once, so one slow member costs this much and no more.
+  let statusTimeoutMs = STATUS_TIMEOUT_MS;
+  if (env.GATEWAY_STATUS_TIMEOUT_MS !== undefined) {
+    const parsed = Number(env.GATEWAY_STATUS_TIMEOUT_MS);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      problems.push(
+        `GATEWAY_STATUS_TIMEOUT_MS is not a number of milliseconds: ${JSON.stringify(env.GATEWAY_STATUS_TIMEOUT_MS)}`,
+      );
+    } else {
+      statusTimeoutMs = parsed;
+    }
+  }
+
   // The proxy for `.anyone` hosts. Validated here so a deployment that meant
   // to hide finds out at startup; M5-6 is what dials through it.
   let socksProxy;
@@ -152,5 +168,6 @@ export function readConfig(env, { readFile = (p) => readFileSync(p, 'utf8') } = 
     httpPort,
     tls,
     socksProxy,
+    statusTimeoutMs,
   };
 }

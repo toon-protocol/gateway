@@ -1,0 +1,220 @@
+// Finding where a granted workload is running, and sending the tenant there.
+//
+// RESOLUTION FOLLOWS THE GRANT AND NOTHING ELSE (spec §12). The grant names
+// the Standby Set; each member's Provider Profile says where its connector is;
+// every member is asked for `status` with a request this gateway signed and
+// the grant inside it; the member answering `running` with `access` is the one
+// running the workload. Members are asked in parallel because a Standby Set is
+// several providers and a slow one must not hold up the others, and the answer
+// is taken in `standby_set` order — primary first — so a Takeover that has
+// settled in two places at once still resolves the same way everywhere.
+//
+// A member that answers `reserved`, `stopped` or an ending is simply not the
+// target: that is a Warm Standby doing its job (spec §6.7), not a failure. A
+// member that cannot be reached is not the target either, and the two are told
+// apart in what the tenant is answered, because they mean opposite things —
+// "nothing is running your workload" and "something may be, and we cannot see
+// it".
+//
+// WHAT M5-5 TAKES OVER FROM HERE. The current target per workload lives in
+// `targets` and nowhere else; `resolveNow` is the one way a resolution is
+// started, and it collapses concurrent callers onto one attempt; `targetFor`
+// answers from `targets` without asking anybody when a target is already
+// known, which is already the "last known target keeps serving" rule — what
+// M5-5 adds is a reason to re-ask (a Takeover, a cadence, an expiry) rather
+// than a different way to ask.
+
+import { forwardRequest, forwardUpgrade } from './forward.mjs';
+import { unavailable } from './reasons.mjs';
+import { askStatus, statusRequest, STATUS_TIMEOUT_MS } from './status.mjs';
+
+/**
+ * The host port a granted `http_port` was published at.
+ *
+ * `http_port` is the CONTAINER port the spawn asked for (spec §3.1.3); the
+ * host port is the provider's to choose and comes back in `access`. Neither
+ * the first port nor the SSH port is it, and guessing either would put a
+ * tenant's traffic into whatever else the workload exposes.
+ */
+export function hostPortFor(access, httpPort) {
+  if (!Array.isArray(access?.ports)) return undefined;
+  const published = access.ports.find(
+    (entry) => entry !== null && typeof entry === 'object' && entry.container_port === httpPort,
+  );
+  const port = published?.host_port;
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : undefined;
+}
+
+/**
+ * @param {{
+ *   secretKey: () => string,
+ *   profiles: ReturnType<typeof import('./profiles.mjs').createProfiles>,
+ *   dialer?: { connect: (host: string, port: number) => import('node:net').Socket | undefined },
+ *   now?: () => number,
+ *   log?: (line: string) => void,
+ *   statusTimeoutMs?: number,
+ * }} deps
+ */
+export function createResolver({
+  secretKey,
+  profiles,
+  dialer,
+  now = () => Math.floor(Date.now() / 1000),
+  log = () => {},
+  statusTimeoutMs = STATUS_TIMEOUT_MS,
+}) {
+  /** Where each workload is running, as far as this gateway knows. */
+  /** @type {Map<string, { host: string, port: number, member: string, at: number }>} */
+  const targets = new Map();
+  /** One resolution per workload at a time; concurrent requests join it. */
+  /** @type {Map<string, Promise<any>>} */
+  const inFlight = new Map();
+
+  const connect = dialer?.connect;
+
+  /**
+   * Ask ONE member where the workload is.
+   *
+   * @returns {Promise<{ reached: true, target?: object } | { reached: false, why: string }>}
+   */
+  const askMember = async (grant, member) => {
+    const profile = profiles.get(member);
+    if (profile === undefined) {
+      return { reached: false, why: 'no Provider Profile for it was found on any relay watched' };
+    }
+
+    let answered;
+    try {
+      answered = await askStatus({
+        connectorUrl: profile.connectorUrl,
+        request: statusRequest({
+          secretKey: secretKey(),
+          member,
+          workloadId: grant.workloadId,
+          grantEvent: grant.event,
+          now: now(),
+        }),
+        timeoutMs: statusTimeoutMs,
+        connect,
+      });
+    } catch (e) {
+      return { reached: false, why: `${profile.connectorUrl}: ${e instanceof Error ? e.message : String(e)}` };
+    }
+
+    const body = answered.body;
+    // A refusal IS an answer: a member that says `bad_grant` or
+    // `unknown_workload` has been reached and is not running the workload.
+    if (body?.error !== undefined) {
+      log(`member ${member} refused \`status\` for ${grant.workloadId}: ${body.error}`);
+      return { reached: true };
+    }
+    if (body?.state !== 'running') return { reached: true };
+    if (typeof body.access?.host !== 'string' || body.access.host === '') {
+      log(`member ${member} answers \`running\` for ${grant.workloadId} with no \`access.host\``);
+      return { reached: true };
+    }
+    const port = hostPortFor(body.access, grant.httpPort);
+    if (port === undefined) {
+      log(
+        `member ${member} answers \`running\` for ${grant.workloadId} but publishes no host port ` +
+          `for the grant's \`http_port\` ${grant.httpPort}`,
+      );
+      return { reached: true };
+    }
+    return { reached: true, target: { host: body.access.host, port, member, at: now() } };
+  };
+
+  /** Ask every member, and take the first that is running. */
+  const ask = async (grant) => {
+    const members = grant.standbySet;
+    profiles.watch(members);
+    await profiles.waitFor(members);
+
+    const answers = await Promise.all(members.map((member) => askMember(grant, member)));
+
+    // `standby_set` order, primary first: whichever members happened to answer
+    // first, the same Standby Set resolves the same way on every gateway.
+    const found = answers.find((answer) => answer.reached && answer.target !== undefined);
+    if (found?.target !== undefined) {
+      const target = /** @type {any} */ (found.target);
+      const held = targets.get(grant.workloadId);
+      if (held?.host !== target.host || held?.port !== target.port) {
+        log(
+          `workload ${grant.workloadId} is running at ${target.host}:${target.port} ` +
+            `on member ${target.member}`,
+        );
+      }
+      targets.set(grant.workloadId, target);
+      return { target };
+    }
+
+    targets.delete(grant.workloadId);
+    const unreached = answers.filter((answer) => !answer.reached);
+    if (unreached.length === 0) {
+      return {
+        unavailable: unavailable('no_running_member', {
+          workloadId: grant.workloadId,
+          members: members.length,
+        }),
+      };
+    }
+    log(
+      `workload ${grant.workloadId}: ${unreached.length} of ${members.length} member(s) could not ` +
+        `be reached: ${unreached.map((answer) => answer.why).join('; ')}`,
+    );
+    return {
+      unavailable: unavailable('member_unreachable', {
+        workloadId: grant.workloadId,
+        why: unreached.map((answer) => answer.why).join('; '),
+      }),
+    };
+  };
+
+  /** Start a resolution, or join the one already running for this workload. */
+  const resolveNow = (grant) => {
+    const running = inFlight.get(grant.workloadId);
+    if (running !== undefined) return running;
+    const attempt = ask(grant).finally(() => inFlight.delete(grant.workloadId));
+    inFlight.set(grant.workloadId, attempt);
+    return attempt;
+  };
+
+  /** Where to send a request now: what is known, or a resolution. */
+  const targetFor = (grant) => {
+    const held = targets.get(grant.workloadId);
+    return held === undefined ? resolveNow(grant) : Promise.resolve({ target: held });
+  };
+
+  /** @type {import('./serve.mjs').Resolver} */
+  const resolve = async ({ grant, req, res, socket, head, secure }) => {
+    const found = await targetFor(grant);
+    if (found.unavailable !== undefined) return found;
+    const target = found.target;
+    const forwarded =
+      res === undefined
+        ? await forwardUpgrade({ req, socket, head, target, workloadId: grant.workloadId, secure, connect })
+        : await forwardRequest({ req, res, target, workloadId: grant.workloadId, secure, connect });
+
+    // The address we believed in did not answer. Forget it, so the next
+    // request asks the Standby Set again instead of retrying a dead host.
+    if (forwarded?.unavailable !== undefined && targets.get(grant.workloadId) === target) {
+      targets.delete(grant.workloadId);
+    }
+    return forwarded;
+  };
+
+  return {
+    /** The resolver `startGateway` runs with. */
+    resolve,
+    /** Ask the Standby Set again, now (M5-5's Takeover and cadence hook). */
+    resolveNow,
+    /** Where a workload is running, as far as this gateway knows. */
+    current: (workloadId) => targets.get(workloadId),
+    /** Stop serving a workload's last known target (M5-5: expiry, rotation). */
+    forget: (workloadId) => targets.delete(workloadId),
+    close() {
+      targets.clear();
+      inFlight.clear();
+    },
+  };
+}

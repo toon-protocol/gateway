@@ -10,8 +10,7 @@
 // far — and call `defineReason` only when the reason belongs beside the code
 // that raises it, in another module. Either way nothing else changes: the HTTP
 // status, the JSON shape, the HTML page and the header are all derived from
-// the row. M5-4 adds `no_running_member` and `member_unreachable`; M5-6 adds
-// the missing proxy.
+// the row. M5-6 adds the missing proxy.
 //
 // A row is `code -> (context) => message`. The context is whatever the caller
 // knows; a message that names the hostname or the workload id is worth far
@@ -31,6 +30,18 @@ export const REASONS = {
   not_resolved: ({ workloadId }) =>
     `not resolved yet: this gateway holds a grant for workload ${workloadId} but has not yet ` +
     'found which member of its Standby Set is running it.',
+
+  no_running_member: ({ workloadId, members }) =>
+    `no member is running it: all ${members} member(s) of the Standby Set for workload ` +
+    `${workloadId} answered \`status\`, and none of them answered \`running\` with access ` +
+    'details. A Warm Standby that has not taken over answers `reserved`, a primary that stopped ' +
+    'its own workload answers `stopped`, and a lease that ended says so (spec \u00a76.7).',
+
+  member_unreachable: ({ workloadId, address, why }) =>
+    `a member could not be reached: this gateway holds a grant for workload ${workloadId} and ` +
+    `cannot reach ${address === undefined ? 'the Standby Set member that would answer for it' : address}` +
+    `${why === undefined ? '' : ` (${why})`}. Something may well be running the workload; this ` +
+    'gateway cannot see it, which is not the same as nothing running (spec \u00a712).',
 };
 
 /**

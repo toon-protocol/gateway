@@ -13,10 +13,13 @@
 import { createServer as createHttpServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 
+import { createDialer } from './dial.mjs';
 import { K_GATEWAY_GRANT } from './kinds.mjs';
 import { createHeldGrants } from './grants.mjs';
+import { createProfiles } from './profiles.mjs';
 import { createRelayPool, grantFilter } from './relays.mjs';
-import { createRequestHandler, notResolved } from './serve.mjs';
+import { createResolver } from './resolve.mjs';
+import { createRequestHandler } from './serve.mjs';
 
 const listen = (server, port, address) =>
   new Promise((resolve, reject) => {
@@ -30,6 +33,10 @@ const listen = (server, port, address) =>
 /**
  * Start a Workload Gateway.
  *
+ * `resolve` is the resolver seam (`src/serve.mjs`). Left out, this gateway
+ * runs the real one: Profiles off the relays, `status` to every Standby Set
+ * member, and forwarding to whichever is running the workload.
+ *
  * @param {{
  *   config: ReturnType<typeof import('./config.mjs').readConfig>,
  *   resolve?: import('./serve.mjs').Resolver,
@@ -40,14 +47,29 @@ const listen = (server, port, address) =>
  */
 export async function startGateway({
   config,
-  resolve = notResolved,
+  resolve,
   pool,
   now = () => Math.floor(Date.now() / 1000),
   log = () => {},
 }) {
   const relays = pool ?? createRelayPool({ log });
-  const grants = createHeldGrants({ gatewayPubkey: config.publicKey, log });
-  const handler = createRequestHandler({ domain: config.domain, grants, resolve, now, log });
+  const grants = createHeldGrants({ gatewayPubkey: config.publicKey, now, log });
+  const profiles = createProfiles({ pool: relays, relays: config.relays, log });
+  const resolver = createResolver({
+    secretKey: config.secretKey,
+    profiles,
+    dialer: createDialer({ socksProxy: config.socksProxy }),
+    now,
+    log,
+    statusTimeoutMs: config.statusTimeoutMs,
+  });
+  const handler = createRequestHandler({
+    domain: config.domain,
+    grants,
+    resolve: resolve ?? resolver.resolve,
+    now,
+    log,
+  });
 
   /** Resolves the first time a relay has sent everything it already held. */
   let markCaughtUp = () => {};
@@ -67,9 +89,19 @@ export async function startGateway({
 
   /** @type {import('node:http').Server[]} */
   const servers = [];
+  // A socket an upgrade hijacked is no longer one the server counts, so
+  // `close()` would not wait for it and `closeAllConnections()` would not end
+  // it: a gateway fronting one WebSocket a tenant holds open for hours would
+  // simply never finish shutting down. They are tracked here instead.
+  /** @type {Set<import('node:stream').Duplex>} */
+  const upgraded = new Set();
   const wire = (server, secure) => {
     server.on('request', (req, res) => handler.handleRequest(req, res, { secure }));
-    server.on('upgrade', (req, socket, head) => handler.handleUpgrade(req, socket, head, { secure }));
+    server.on('upgrade', (req, socket, head) => {
+      upgraded.add(socket);
+      socket.on('close', () => upgraded.delete(socket));
+      handler.handleUpgrade(req, socket, head, { secure });
+    });
     servers.push(server);
     return server;
   };
@@ -99,6 +131,10 @@ export async function startGateway({
     grants,
     /** The relay pool, so M5-5 can open its own Takeover subscriptions on it. */
     pool: relays,
+    /** The Standby Set members' Profiles: connectors, Relay Sets, cadences. */
+    profiles,
+    /** Resolution: `resolveNow`, `current`, `forget` — M5-5's whole seam. */
+    resolver,
     httpPort,
     httpsPort,
     /** Resolves once some relay has replayed the grants it already held. */
@@ -106,7 +142,11 @@ export async function startGateway({
 
     async stop() {
       subscription.close();
+      profiles.close();
+      resolver.close();
       relays.close();
+      for (const socket of upgraded) socket.destroy();
+      upgraded.clear();
       await Promise.all(
         servers.map(
           (server) =>
