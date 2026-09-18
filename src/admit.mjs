@@ -32,8 +32,9 @@
 
 import { randomUUID } from 'node:crypto';
 
+import { refuse } from './door.mjs';
+import { readHandover } from './messages.mjs';
 import { hostnameFor } from './hostname.mjs';
-import { HANDOVER_PATH, readHandover } from './handover.mjs';
 
 /** How many admission rounds one member may be asked for in a minute. */
 export const ADMIT_PER_MINUTE = 6;
@@ -80,9 +81,6 @@ export function createAdmissionRate({ perMinute = ADMIT_PER_MINUTE, clock = () =
     },
   };
 }
-
-/** A refusal, in the error shape of spec §5 — exactly two keys. */
-const refuse = (status, error, message) => ({ status, body: { error, message } });
 
 /**
  * The gateway's admission door.
@@ -205,79 +203,5 @@ export function createAdmission({
         },
       };
     },
-  };
-}
-
-/**
- * The listener a gateway's connector forwards sealed handovers to.
- *
- * It is its OWN port, not a path on the listeners that front workloads: §12.5
- * forbids a gateway requiring anything of the workload, and a reserved path
- * would carve a hole out of every tenant's URL space.
- *
- * @param {{ admission: { admit: (body: any) => Promise<{ status: number, body: object }> }, log?: (line: string) => void }} deps
- */
-export function createHandoverHandler({ admission, log = () => {} }) {
-  /** Nothing sealed to a gateway is large; a bigger body is not a handover. */
-  const MAX_BYTES = 64 * 1024;
-
-  return (req, res) => {
-    const answer = ({ status, body }) => {
-      const payload = `${JSON.stringify(body)}\n`;
-      res.writeHead(status, {
-        'content-type': 'application/json; charset=utf-8',
-        'content-length': String(Buffer.byteLength(payload)),
-      });
-      res.end(payload);
-    };
-
-    // The body is read to its end BEFORE anything is answered, refusals
-    // included: a response written over a request still arriving is a
-    // connection Node closes under us, and the sender would see a hang-up
-    // where it should see a refusal it can act on.
-    /** @type {Buffer[]} */
-    const chunks = [];
-    let bytes = 0;
-    let stopped = false;
-    req.on('data', (chunk) => {
-      if (stopped) return;
-      bytes += chunk.length;
-      if (bytes > MAX_BYTES) {
-        stopped = true;
-        answer(refuse(413, 'invalid_handover', 'that is far too large to be a handover'));
-        req.destroy();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on('end', () => {
-      if (stopped) return;
-      if (req.method !== 'POST' || (req.url ?? '').split('?')[0] !== HANDOVER_PATH) {
-        answer(refuse(404, 'invalid_handover', `a Gateway Handover is POSTed to ${HANDOVER_PATH} (spec §12.1)`));
-        return;
-      }
-      let body;
-      try {
-        body = JSON.parse(Buffer.concat(chunks).toString('utf8') || 'null');
-      } catch {
-        answer(refuse(400, 'invalid_handover', 'the body is not JSON'));
-        return;
-      }
-      admission.admit(body).then(answer, (e) => {
-        // NOT `not_admitted`: that says the members refused the grant, and
-        // here nobody finished being asked. A gateway fault is the gateway's
-        // to own, and a tenant that is told the wrong one would go and derive
-        // a grant that was never the problem.
-        log(`admitting a handover threw: ${e instanceof Error ? e.stack : String(e)}`);
-        answer(
-          refuse(
-            503,
-            'admission_failed',
-            'this gateway could not carry out an admission round just now; nothing was decided ' +
-              'about the grant. Try again.',
-          ),
-        );
-      });
-    });
   };
 }
