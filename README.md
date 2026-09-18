@@ -417,8 +417,13 @@ at all. A gateway is not a probe, and an unknown hostname must not become one.
 Admission answers its own refusals, at the handover port and in the same
 `{ "error", "message" }` shape: `invalid_handover` (it is not a handover),
 `grant_expired` (its moment has passed, so nothing was asked), `rate_limited`
-(this provider is over its admission rate, so nothing was asked) and
-`not_admitted` (no member took the grant; the handover was dropped).
+(a provider it names is over its admission rate, so nothing was asked),
+`not_admitted` (the round was made and no member took the grant; the handover
+was dropped), `no_proxy` (a member it names is at an `.anyone` address this
+gateway has no anon client for, so nothing was dialled) and `admission_failed`
+(this gateway could not make a round at all). The last three are deliberately
+not one code: only `not_admitted` is a reason to go and derive another grant.
+A handover it admitted is answered `{ "workload_id", "hostname", "expires_at" }`.
 
 `no_running_member` and `member_unreachable` are deliberately not one reason:
 the first says nothing is running the workload, the second says this gateway

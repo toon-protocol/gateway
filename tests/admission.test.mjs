@@ -25,13 +25,19 @@ const HTTP_PORT = 8080;
 const handoverFor = (overrides = {}) =>
   gatewayHandover({ workloadId: WORKLOAD, httpPort: HTTP_PORT, standbySet: [MEMBER.public_key], ...overrides });
 
-/** A member that really holds the lease, and its Profile. */
-async function member(t, { workloadId = WORKLOAD, host = '127.0.0.1', port = 41000 } = {}) {
+/**
+ * A member that really holds the lease, and its Profile.
+ *
+ * @param {import('node:test').TestContext} t
+ * @param {{ workloadId?: string, host?: string, port?: number, now?: () => number }} [options]
+ */
+async function member(t, { workloadId = WORKLOAD, host = '127.0.0.1', port = 41000, now } = {}) {
   const connector = await startStubConnector({
     pubkey: MEMBER.public_key,
     answer: asProvider({
       member: MEMBER.public_key,
       workloadId,
+      now,
       answer: (context) =>
         running({
           workloadId: context.workloadId,
@@ -109,15 +115,25 @@ describe('a sealed handover', () => {
   });
 
   it('replaces the grant it holds when a later handover is admitted for the workload', async (t) => {
-    const { profile } = await member(t);
-    const gateway = await startTestGateway({ events: [profile] });
+    let clock = CONSTANTS.now;
+    const { profile } = await member(t, { now: () => clock });
+    const gateway = await startTestGateway({ events: [profile], now: () => clock });
     t.after(() => gateway.close());
 
+    const host = gateway.hostFor(WORKLOAD);
     await gateway.handover(handoverFor({ expiresAt: CONSTANTS.now + 600 }));
     const renewed = await gateway.handover(handoverFor({ expiresAt: CONSTANTS.now + 9000 }));
     assert.equal(renewed.status, 200);
     assert.equal(renewed.json().expires_at, CONSTANTS.now + 9000);
-    assert.equal(gateway.gateway.grants.size, 1, 'a renewal is not a second grant');
+
+    // The first grant's moment passes and the workload is served anyway: the
+    // second REPLACED it rather than joining it, so there is nothing left
+    // holding this hostname to the earlier moment.
+    clock = CONSTANTS.now + 601;
+    assert.notEqual((await gateway.get(host)).headers['toon-gateway-reason'], 'grant_expired');
+
+    clock = CONSTANTS.now + 9001;
+    assert.equal((await gateway.get(host)).headers['toon-gateway-reason'], 'grant_expired');
   });
 });
 
@@ -149,6 +165,46 @@ describe('a handover the members refuse', () => {
     await gateway.get(host);
     await gateway.get(host);
     assert.equal(connector.requests.length, asked, 'the handover is gone, not queued');
+  });
+
+  it('leaves nothing of itself behind: not a target, not a watched Profile', async (t) => {
+    // "Dropped, and never retried" has to mean the gateway kept NOTHING, or a
+    // stranger could grow what this process watches one sealed packet at a
+    // time — free, and for the life of the process (spec §12.1).
+    const { profile } = await member(t);
+    const gateway = await startTestGateway({
+      events: [profile],
+      handovers: [handoverFor()],
+      env: { GATEWAY_RESOLVE_TIMEOUT_MS: '100' },
+    });
+    t.after(() => gateway.close());
+
+    const authorsWatched = () => {
+      const profileFilters = gateway.relay.requests
+        .flatMap((r) => r.filters)
+        .filter((f) => f.kinds?.includes(K_PROFILE) && f.authors !== undefined);
+      return profileFilters.at(-1)?.authors ?? [];
+    };
+    await until(() => authorsWatched().includes(MEMBER.public_key), {
+      what: 'the served workload\'s member to be watched',
+    });
+
+    // Sixteen providers nobody has ever heard of, in a handover anyone could
+    // have sealed. They answer nothing, so admission refuses it.
+    const strangers = Array.from({ length: 16 }, (_, i) => `e${i.toString(16)}`.padEnd(2, '0').repeat(32));
+    const answered = await gateway.handover(handoverFor({ workloadId: OTHER_WORKLOAD, standbySet: strangers }));
+    assert.equal(answered.json().error, 'not_admitted');
+
+    await until(() => !authorsWatched().some((author) => strangers.includes(author)), {
+      what: 'the refused handover\'s members to be let go of',
+    });
+    assert.deepEqual(authorsWatched(), [MEMBER.public_key], 'only what is served is watched');
+    assert.equal((await gateway.get(gateway.hostFor(OTHER_WORKLOAD))).headers['toon-gateway-reason'], 'no_grant');
+    assert.notEqual(
+      (await gateway.get(gateway.hostFor(WORKLOAD))).headers['toon-gateway-reason'],
+      'no_grant',
+      'and the served workload is untouched',
+    );
   });
 
   it('is refused the same way when no member can be reached at all', async (t) => {

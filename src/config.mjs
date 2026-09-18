@@ -41,16 +41,19 @@ export function readConfig(env, { readFile = (p) => readFileSync(p, 'utf8') } = 
   /** @type {string[]} */
   const problems = [];
 
-  /** A duration in milliseconds, or the default, or a named problem. */
-  const millis = (key, fallback) => {
+  /** A positive whole number, or the default, or a named problem in `unit`. */
+  const positive = (key, fallback, unit) => {
     if (env[key] === undefined) return fallback;
     const parsed = Number(env[key]);
     if (!Number.isInteger(parsed) || parsed < 1) {
-      problems.push(`${key} is not a number of milliseconds: ${JSON.stringify(env[key])}`);
+      problems.push(`${key} is not ${unit}: ${JSON.stringify(env[key])}`);
       return fallback;
     }
     return parsed;
   };
+
+  /** A duration in milliseconds, or the default, or a named problem. */
+  const millis = (key, fallback) => positive(key, fallback, 'a number of milliseconds');
 
   const domain = env.GATEWAY_DOMAIN?.trim().toLowerCase().replace(/\.$/, '');
   if (!domain) {
@@ -145,17 +148,11 @@ export function readConfig(env, { readFile = (p) => readFileSync(p, 'utf8') } = 
   // minute (spec §12.1). Anyone can seal a handover naming any provider, so
   // one sealed packet buys one free `status` per member it names; this is what
   // stops a burst of unsolicited handovers making a reflector of this gateway.
-  let admitPerMinute = ADMIT_PER_MINUTE;
-  if (env.GATEWAY_ADMIT_PER_MINUTE !== undefined) {
-    const parsed = Number(env.GATEWAY_ADMIT_PER_MINUTE);
-    if (!Number.isInteger(parsed) || parsed < 1) {
-      problems.push(
-        `GATEWAY_ADMIT_PER_MINUTE is not a number of admissions per minute: ${JSON.stringify(env.GATEWAY_ADMIT_PER_MINUTE)}`,
-      );
-    } else {
-      admitPerMinute = parsed;
-    }
-  }
+  const admitPerMinute = positive(
+    'GATEWAY_ADMIT_PER_MINUTE',
+    ADMIT_PER_MINUTE,
+    'a number of admissions a minute',
+  );
 
   // The anon client every `.anyone` host is dialled through (`src/dial.mjs`).
   // Validated here so a deployment that meant to front a Hidden Provider's

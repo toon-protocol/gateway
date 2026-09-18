@@ -271,6 +271,29 @@ describe('a workload on a Hidden Provider', () => {
     assert.deepEqual(leaked, [], 'and its name never reached the system resolver');
   });
 
+  it('refuses a HANDOVER naming a member at an `.anyone` connector with `no_proxy`, and dials nothing', async (t) => {
+    // Admission is a round of `status` like any other (spec §12.1), so it goes
+    // the same way: `no_proxy` precedes any attempt, and it is not collapsed
+    // into "no member took the grant" — the first is a fact about this
+    // gateway's configuration, the second about the grant (§12.3, §12.8).
+    const leaked = watchResolver(t);
+    const hidden = await member(t, { hidden: true });
+
+    const gateway = await startTestGateway({ events: [hidden.profile] });
+    t.after(() => gateway.close());
+
+    const answered = await gateway.handover(handoverFor([HIDDEN.public_key]));
+    assert.equal(answered.json().error, 'no_proxy');
+    assert.match(answered.json().message, /TOON_SOCKS_PROXY/);
+    assert.equal(hidden.connector.requests.length, 0, 'the connector was never reached');
+    assert.deepEqual(leaked, [], 'and its name never reached the system resolver');
+    assert.equal(
+      (await gateway.get(gateway.hostFor(WORKLOAD))).headers['toon-gateway-reason'],
+      'no_grant',
+      'and no workload was put on a hostname',
+    );
+  });
+
   it('answers `no_proxy` when a public member answers an `.anyone` access host and no proxy is configured', async (t) => {
     const leaked = watchResolver(t);
     // A public connector whose lease is at a hidden address: the `status` leg

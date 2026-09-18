@@ -278,12 +278,12 @@ export function createResolver({
      * be able to ride on a round started for the grant it holds, nor drop the
      * target of a workload already being served by failing.
      */
-    probe: (handover) => askMembers(handover),
+    probe: askMembers,
     /** Serve a workload at a target the admission round already found. */
     remember: (workloadId, target) => targets.set(workloadId, target),
     /** Where a workload is running, as far as this gateway knows. */
     current: (workloadId) => targets.get(workloadId),
-    /** Stop serving a workload's last known target (M5-5: expiry, rotation). */
+    /** Stop serving a workload's last known target (M5-5: a grant that ran out). */
     forget: (workloadId) => targets.delete(workloadId),
     close() {
       targets.clear();

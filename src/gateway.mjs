@@ -96,7 +96,7 @@ export async function startGateway({
     grants,
     probe: probe ?? resolver.probe,
     remember: resolver.remember,
-    onHeld: () => follower.refresh(),
+    onSettled: () => follower.refresh(),
     domain: config.domain,
     now,
     log,

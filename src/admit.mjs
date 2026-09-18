@@ -32,7 +32,7 @@
 
 import { randomUUID } from 'node:crypto';
 
-import { canonicalLabel } from './hostname.mjs';
+import { hostnameFor } from './hostname.mjs';
 import { HANDOVER_PATH, readHandover } from './handover.mjs';
 
 /** How many admission rounds one member may be asked for in a minute. */
@@ -89,9 +89,9 @@ const refuse = (status, error, message) => ({ status, body: { error, message } }
  *
  * @param {{
  *   grants: ReturnType<typeof import('./grants.mjs').createHeldGrants>,
- *   probe: (handover: any) => Promise<{ told: number, target?: any }>,
+ *   probe: (handover: any) => Promise<{ told: number, target?: any, unavailable?: any }>,
  *   remember?: (workloadId: string, target: any) => void,
- *   onHeld?: () => void,
+ *   onSettled?: () => void,
  *   domain: string,
  *   now?: () => number,
  *   log?: (line: string) => void,
@@ -102,7 +102,7 @@ export function createAdmission({
   grants,
   probe,
   remember = () => {},
-  onHeld = () => {},
+  onSettled = () => {},
   domain,
   now = () => Math.floor(Date.now() / 1000),
   log = () => {},
@@ -160,8 +160,24 @@ export function createAdmission({
         );
       }
 
-      const round = await probe(handover);
+      // Every path below this point has already asked somebody, so every one
+      // of them settles: an accepted handover starts being followed, and a
+      // refused one has its members let go of rather than left in the Profile
+      // filter this gateway watches (spec §12.1: a dropped handover is not
+      // remembered).
+      const round = await probe(handover).finally(() => onSettled());
       if (round.told === 0) {
+        // A member this gateway would not even DIAL is a fact about this
+        // gateway's configuration and not about the grant (spec §12.8). §12.3
+        // keeps `no_proxy` apart from every other reason for exactly that, and
+        // it is not collapsed into `not_admitted` at this door either.
+        if (round.unavailable?.reason === 'no_proxy') {
+          log(
+            `handover ${attempt} for workload ${handover.workloadId}: a member of its Standby Set ` +
+              'is at an `.anyone` address this gateway has no proxy for; dropped',
+          );
+          return refuse(503, 'no_proxy', round.unavailable.message);
+        }
         // Dropped, and never retried. Nothing here remembers the handover, so
         // there is nothing to retry with and nothing a burst can accumulate.
         log(
@@ -179,12 +195,12 @@ export function createAdmission({
 
       grants.hold(handover);
       if (round.target !== undefined) remember(handover.workloadId, round.target);
-      onHeld();
+      onSettled();
       return {
         status: 200,
         body: {
           workload_id: handover.workloadId,
-          hostname: `${canonicalLabel(handover.workloadId)}.${domain}`,
+          hostname: hostnameFor(handover.workloadId, domain),
           expires_at: handover.expiresAt,
         },
       };
@@ -206,7 +222,7 @@ export function createHandoverHandler({ admission, log = () => {} }) {
   const MAX_BYTES = 64 * 1024;
 
   return (req, res) => {
-    const answer = (status, body) => {
+    const answer = ({ status, body }) => {
       const payload = `${JSON.stringify(body)}\n`;
       res.writeHead(status, {
         'content-type': 'application/json; charset=utf-8',
@@ -228,7 +244,7 @@ export function createHandoverHandler({ admission, log = () => {} }) {
       bytes += chunk.length;
       if (bytes > MAX_BYTES) {
         stopped = true;
-        answer(413, { error: 'invalid_handover', message: 'that is far too large to be a handover' });
+        answer(refuse(413, 'invalid_handover', 'that is far too large to be a handover'));
         req.destroy();
         return;
       }
@@ -237,29 +253,31 @@ export function createHandoverHandler({ admission, log = () => {} }) {
     req.on('end', () => {
       if (stopped) return;
       if (req.method !== 'POST' || (req.url ?? '').split('?')[0] !== HANDOVER_PATH) {
-        answer(404, {
-          error: 'invalid_handover',
-          message: `a Gateway Handover is POSTed to ${HANDOVER_PATH} (spec §12.1)`,
-        });
+        answer(refuse(404, 'invalid_handover', `a Gateway Handover is POSTed to ${HANDOVER_PATH} (spec §12.1)`));
         return;
       }
       let body;
       try {
         body = JSON.parse(Buffer.concat(chunks).toString('utf8') || 'null');
       } catch {
-        answer(400, { error: 'invalid_handover', message: 'the body is not JSON' });
+        answer(refuse(400, 'invalid_handover', 'the body is not JSON'));
         return;
       }
-      admission.admit(body).then(
-        (outcome) => answer(outcome.status, outcome.body),
-        (e) => {
-          log(`admitting a handover threw: ${e instanceof Error ? e.stack : String(e)}`);
-          answer(503, {
-            error: 'not_admitted',
-            message: 'this gateway could not carry out an admission round just now',
-          });
-        },
-      );
+      admission.admit(body).then(answer, (e) => {
+        // NOT `not_admitted`: that says the members refused the grant, and
+        // here nobody finished being asked. A gateway fault is the gateway's
+        // to own, and a tenant that is told the wrong one would go and derive
+        // a grant that was never the problem.
+        log(`admitting a handover threw: ${e instanceof Error ? e.stack : String(e)}`);
+        answer(
+          refuse(
+            503,
+            'admission_failed',
+            'this gateway could not carry out an admission round just now; nothing was decided ' +
+              'about the grant. Try again.',
+          ),
+        );
+      });
     });
   };
 }

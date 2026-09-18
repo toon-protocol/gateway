@@ -169,6 +169,28 @@ export function createProfiles({ pool, relays, log = () => {} }) {
       reopen();
     },
 
+    /**
+     * Watch these providers and NO OTHERS.
+     *
+     * A round of `status` watches the members it is about before it asks them
+     * (`src/resolve.mjs`), and an ADMISSION round is about members this gateway
+     * may never serve — a handover anyone can seal names whoever it likes (spec
+     * §12.1). Without this, one refused handover would leave its fabricated
+     * pubkeys in the live filter for the life of the process, which is exactly
+     * the "not remembered" a dropped handover is supposed to be. The follower
+     * calls it with the members of everything it is following.
+     */
+    keepOnly(providers) {
+      const wanted = new Set(providers);
+      const dropped = [...watched].filter((provider) => !wanted.has(provider));
+      if (dropped.length === 0) return;
+      for (const provider of dropped) {
+        watched.delete(provider);
+        waiting.delete(provider);
+      }
+      reopen();
+    },
+
     /** The Profile held for a provider, or `undefined`. */
     get: (provider) => known.get(provider),
 
@@ -181,12 +203,16 @@ export function createProfiles({ pool, relays, log = () => {} }) {
       const missing = providers.filter((provider) => !known.has(provider));
       if (missing.length === 0) return;
       let timer;
+      /** @type {[string, () => void][]} what this call put in `waiting`. */
+      const mine = [];
       await Promise.race([
         Promise.all(
           missing.map(
             (provider) =>
               new Promise((wake) => {
-                waiting.set(provider, [...(waiting.get(provider) ?? []), () => wake(undefined)]);
+                const waker = () => wake(undefined);
+                mine.push([provider, waker]);
+                waiting.set(provider, [...(waiting.get(provider) ?? []), waker]);
               }),
           ),
         ),
@@ -196,6 +222,14 @@ export function createProfiles({ pool, relays, log = () => {} }) {
         }),
       ]);
       clearTimeout(timer);
+      // A member whose Profile never arrived left a waker behind. Nothing wakes
+      // it now — this call has given up — and a round about a member that will
+      // never publish one must cost nothing that outlives it.
+      for (const [provider, waker] of mine) {
+        const rest = (waiting.get(provider) ?? []).filter((one) => one !== waker);
+        if (rest.length === 0) waiting.delete(provider);
+        else waiting.set(provider, rest);
+      }
     },
 
     close() {

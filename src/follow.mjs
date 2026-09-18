@@ -5,7 +5,7 @@
 // is what keeps the answer true: WHEN the Standby Set is asked again, and when
 // a workload stops being served at all. Nothing here forwards anything, and
 // nothing here decides where a request goes — it hands the resolver reasons to
-// re-ask and, twice, a reason to forget.
+// re-ask and, once, a reason to forget.
 //
 // THREE REASONS TO RE-ASK, and they are not interchangeable:
 //
@@ -96,8 +96,8 @@ export function createFollower({
    * that opened its settle window and when that window ends.
    *
    * One map rather than four, because every one of these begins and ends
-   * together: a workload rotated away or a grant that ran out stops being
-   * followed in every one of these senses at the same moment.
+   * together: a grant that ran out stops being followed in every one of these
+   * senses at the same moment.
    *
    * @typedef {{
    *   grant: any,
@@ -125,8 +125,8 @@ export function createFollower({
    *
    * That is where §7.1 has a standby publish its claim, and it need not be a
    * relay this gateway is configured with. A primary whose Profile names no
-   * Relay Set leaves nowhere else to look but the relays this gateway already
-   * watches, which is where its tenant's grant came from.
+   * Relay Set leaves nowhere else to look but the relays this gateway is
+   * configured with.
    */
   const relaySetOf = (grant) => {
     const theirs = primaryOf(grant)?.relays ?? [];
@@ -146,10 +146,10 @@ export function createFollower({
    * A Takeover event off the primary's Relay Set.
    *
    * A relay is trusted for nothing: the event's id and signature are checked
-   * here, and a claim signed by a key the GRANT does not name is not a claim
-   * on this workload (§7.1 counts claims from `standby_set` and nobody else).
-   * Without that check, anyone could publish a kind 30433 with this `d` and
-   * hold up every re-ask for two cadences.
+   * here, and a claim signed by a key the HANDOVER does not name is not a
+   * claim on this workload (§7.1 counts claims from `standby_set` and nobody
+   * else). Without that check, anyone could publish a kind 30433 with this `d`
+   * and hold up every re-ask for two cadences.
    */
   const onTakeover = (workloadId) => (event) => {
     const followed = following.get(workloadId);
@@ -172,7 +172,7 @@ export function createFollower({
     if (!followed.grant.standbySet.includes(event.pubkey)) {
       log(
         `ignored a Takeover claim for workload ${workloadId}: it is signed by ${event.pubkey}, ` +
-          'which the grant\'s `standby_set` does not name',
+          'which the handover\'s `standby_set` does not name',
       );
       return;
     }
@@ -249,6 +249,14 @@ export function createFollower({
       });
       log(`workload ${grant.workloadId}: watching ${want.join(', ')} for a Takeover`);
     }
+
+    // And no Profile is watched but for a member of something followed. An
+    // admission round watches the members it is about before it asks them
+    // (`src/resolve.mjs`), and a handover anyone can seal names whoever it
+    // likes: without this, one refused handover would leave its fabricated
+    // pubkeys in the live filter for good, which is not the "dropped, and not
+    // remembered" spec §12.1 requires of one.
+    profiles.keepOnly([...held.values()].flatMap((grant) => grant.standbySet));
   };
 
   /** Re-sync after the events of one turn, rather than once per event. */
@@ -291,9 +299,10 @@ export function createFollower({
     /**
      * Follow what is held now.
      *
-     * Admission calls it when a handover is accepted, so a workload starts
-     * being followed the moment it starts being served rather than on the
-     * next tick.
+     * Admission calls it after EVERY round it finishes, not only an accepted
+     * one: an accepted handover starts being followed at once rather than on
+     * the next tick, and a refused one has its members let go of at once
+     * rather than lingering in the Profile filter.
      */
     refresh: scheduleSync,
 
