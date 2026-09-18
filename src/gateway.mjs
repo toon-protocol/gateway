@@ -15,13 +15,15 @@
 import { createServer as createHttpServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 
-import { createAdmission, createAdmissionRate, createHandoverHandler } from './admit.mjs';
+import { createAdmission, createAdmissionRate } from './admit.mjs';
 import { createDialer } from './dial.mjs';
+import { createTenantDoor } from './door.mjs';
 import { createFollower } from './follow.mjs';
 import { createHeldGrants } from './grants.mjs';
 import { createProfiles } from './profiles.mjs';
 import { createRelayPool } from './relays.mjs';
 import { createResolver } from './resolve.mjs';
+import { createWithdrawals } from './withdraw.mjs';
 import { withDialRewrites } from './rewrite.mjs';
 import { createRequestHandler } from './serve.mjs';
 
@@ -103,6 +105,15 @@ export async function startGateway({
     rate: createAdmissionRate({ perMinute: config.admitPerMinute }),
   });
 
+  // Withdrawal: a tenant taking a workload off this gateway before its grant
+  // runs out (spec §12.7). It asks nobody, so it is answered on the spot.
+  const withdrawals = createWithdrawals({
+    grants,
+    onWithdrawn: () => follower.refresh(),
+    domain: config.domain,
+    log,
+  });
+
   follower.start();
 
   /** @type {import('node:http').Server[]} */
@@ -143,13 +154,14 @@ export async function startGateway({
     log(`listening for HTTP on ${config.bindAddress}:${httpPort} for *.${config.domain}`);
   }
 
-  // The admission door: its OWN listener, behind this gateway's connector,
-  // where a sealed Gateway Handover arrives (spec §12.1). It fronts no
-  // workload, so no tenant's URL space is carved into (§12.5).
-  const handovers = createHttpServer(createHandoverHandler({ admission, log }));
+  // The tenant's door: its OWN listener, behind this gateway's connector,
+  // where a sealed Gateway Handover (spec §12.1) and a sealed Gateway
+  // Withdrawal (§12.7) arrive. It fronts no workload, so no tenant's URL space
+  // is carved into (§12.5).
+  const handovers = createHttpServer(createTenantDoor({ admission, withdrawals, log }));
   servers.push(handovers);
   const handoverPort = await listen(handovers, config.handoverPort, config.bindAddress);
-  log(`listening for Gateway Handovers on ${config.bindAddress}:${handoverPort}`);
+  log(`listening for Gateway Handovers and Withdrawals on ${config.bindAddress}:${handoverPort}`);
 
   return {
     config,
@@ -163,7 +175,7 @@ export async function startGateway({
     resolver,
     httpPort,
     httpsPort,
-    /** Where a sealed Gateway Handover is forwarded to (spec §12.1). */
+    /** Where a sealed Gateway Handover or Withdrawal is forwarded to (spec §12.1, §12.7). */
     handoverPort,
 
     async stop() {

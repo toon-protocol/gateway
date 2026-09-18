@@ -1,4 +1,6 @@
-// The Gateway Handover (spec §12.1): the whole of this gateway's authority.
+// The two messages a tenant seals to a gateway: the Gateway Handover (spec
+// §12.1), which is the whole of this gateway's authority, and the Gateway
+// Withdrawal (spec §12.7), which ends it serving a workload.
 //
 // A tenant chooses a gateway by SEALING ONE PACKET to its connector — there is
 // nothing published to find any more, and nothing signed to check. The message
@@ -22,8 +24,15 @@
 // drops the handover, because one malformed packet must never disturb the
 // workloads already being served.
 //
+// A WITHDRAWAL IS THE SAME MEMBERS, and deliberately so: it names the workload
+// and bears, for each member, the grant derived for that member's own key at
+// the moment the handover named. A gateway that can read one message has
+// learned to read the other, and `readMembers` below is the one place either
+// is read. What a withdrawal does NOT carry is an `http_port` or a `name`:
+// there is nothing left to serve, so there is nothing to serve it on.
+//
 // The `grant` is a SECRET (spec §6.1.1): it is never logged, never put in a
-// message, and never handed to anybody but the members this handover names.
+// message, and never handed to anybody but the members these messages name.
 
 import { isKey32 } from './nostr.mjs';
 
@@ -46,42 +55,46 @@ const isLabel = (value) =>
   value.length <= 63 &&
   /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(value);
 
-const KEYS = ['workload_id', 'standby_set', 'http_port', 'expires_at', 'name'];
+const HANDOVER_KEYS = ['workload_id', 'standby_set', 'http_port', 'expires_at', 'name'];
+const WITHDRAWAL_KEYS = ['workload_id', 'standby_set', 'expires_at'];
 const MEMBER_KEYS = ['provider', 'grant'];
 
 /**
- * Read a request body as a Gateway Handover, or throw saying what is wrong.
+ * The one message under `key`, or throw saying what is wrong.
  *
- * The body is `{ "handover": … }`, one key and no other, exactly as a Lease
- * Request's body is `{ "request": … }` (spec §6.1.2): the gateway's connector
- * unseals the envelope and forwards plain HTTP, so what arrives here is
- * plaintext JSON.
+ * The body is `{ "handover": … }` or `{ "withdrawal": … }`, one key and no
+ * other, exactly as a Lease Request's body is `{ "request": … }` (spec
+ * §6.1.2): the gateway's connector unseals the envelope and forwards plain
+ * HTTP, so what arrives here is plaintext JSON.
  */
-export function readHandover(body) {
+function readMessage(body, key, keys) {
   if (body === null || typeof body !== 'object' || Array.isArray(body)) {
     throw new Error('the body is not a JSON object');
   }
-  const keys = Object.keys(body);
-  if (keys.length !== 1 || keys[0] !== 'handover') {
-    throw new Error('the body is not `{ "handover": … }` and nothing else');
+  const outer = Object.keys(body);
+  if (outer.length !== 1 || outer[0] !== key) {
+    throw new Error(`the body is not \`{ "${key}": … }\` and nothing else`);
   }
-  const handover = body.handover;
-  if (handover === null || typeof handover !== 'object' || Array.isArray(handover)) {
-    throw new Error('its `handover` is not a JSON object');
+  const message = body[key];
+  if (message === null || typeof message !== 'object' || Array.isArray(message)) {
+    throw new Error(`its \`${key}\` is not a JSON object`);
   }
   // A field this spec does not name is refused rather than dropped (ADR 0004),
   // so a tenant that meant something by it learns that nobody read it.
-  const unknown = Object.keys(handover).filter((key) => !KEYS.includes(key));
+  const unknown = Object.keys(message).filter((field) => !keys.includes(field));
   if (unknown.length > 0) {
-    throw new Error(`it carries a field no handover names: ${unknown.join(', ')}`);
+    throw new Error(`it carries a field no ${key} names: ${unknown.join(', ')}`);
   }
+  return message;
+}
 
-  const { workload_id: workloadId, standby_set: members, http_port: httpPort } = handover;
-  const { expires_at: expiresAt, name } = handover;
-
-  if (!isKey32(workloadId)) {
-    throw new Error('its `workload_id` is not 64 hex characters');
-  }
+/**
+ * The `standby_set` both messages carry: the members in their own order,
+ * primary first (spec §7, §12.4), each with the grant derived for its own key.
+ *
+ * @returns {{ standbySet: string[], grantFor: (member: string) => string | undefined }}
+ */
+function readMembers(members) {
   if (!Array.isArray(members) || members.length === 0) {
     throw new Error('its `standby_set` is not a non-empty list of members');
   }
@@ -123,6 +136,27 @@ export function readHandover(body) {
     standbySet.push(provider);
   }
 
+  return {
+    standbySet,
+    /** The Gateway Grant derived for one member (spec §6.5.1). A SECRET: never log it. */
+    grantFor: (member) => grants.get(member),
+  };
+}
+
+/**
+ * Read a request body as a Gateway Handover, or throw saying what is wrong.
+ */
+export function readHandover(body) {
+  const handover = readMessage(body, 'handover', HANDOVER_KEYS);
+
+  const { workload_id: workloadId, standby_set: members, http_port: httpPort } = handover;
+  const { expires_at: expiresAt, name } = handover;
+
+  if (!isKey32(workloadId)) {
+    throw new Error('its `workload_id` is not 64 hex characters');
+  }
+  const { standbySet, grantFor } = readMembers(members);
+
   if (!Number.isInteger(httpPort) || httpPort < 1 || httpPort > 65535) {
     throw new Error(`its \`http_port\` is not a port: ${JSON.stringify(httpPort)}`);
   }
@@ -142,12 +176,36 @@ export function readHandover(body) {
     standbySet,
     httpPort,
     expiresAt,
-    /** The Gateway Grant derived for one member (spec §6.5.1). A SECRET: never log it. */
-    grantFor: (member) => grants.get(member),
+    grantFor,
     name: nameProblem === undefined ? name : undefined,
     /** Why the `name` was dropped, if there was one to drop. */
     nameProblem,
     /** `now <= expires_at`, exactly the window a provider applies (spec §6.5.1). */
     inForceAt: (now) => now <= expiresAt,
   };
+}
+
+/**
+ * Read a request body as a Gateway Withdrawal, or throw saying what is wrong.
+ *
+ * `expires_at` says WHICH grant this withdrawal bears — the moment the
+ * handover named, under which the values in `standby_set` were derived — and
+ * it is NOT compared with the clock here or anywhere else (spec §12.7). A
+ * withdrawal of a grant that has already run out is an ordinary withdrawal: it
+ * still frees the workload's names, which an expired grant is still holding.
+ */
+export function readWithdrawal(body) {
+  const withdrawal = readMessage(body, 'withdrawal', WITHDRAWAL_KEYS);
+
+  const { workload_id: workloadId, standby_set: members, expires_at: expiresAt } = withdrawal;
+
+  if (!isKey32(workloadId)) {
+    throw new Error('its `workload_id` is not 64 hex characters');
+  }
+  const { standbySet, grantFor } = readMembers(members);
+  if (!Number.isInteger(expiresAt)) {
+    throw new Error(`its \`expires_at\` is not a unix time: ${JSON.stringify(expiresAt)}`);
+  }
+
+  return { workloadId: workloadId.toLowerCase(), standbySet, expiresAt, grantFor };
 }

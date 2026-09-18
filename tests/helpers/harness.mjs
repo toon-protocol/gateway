@@ -2,10 +2,10 @@
 // listening ports, against a stub relay, stub provider connectors and stub
 // workloads.
 //
-// TWO seams, and they are the two a tenant has. A handover is POSTed at the
-// gateway's HANDOVER port, which is where its connector forwards a sealed
-// packet (spec §12.1); a request for a workload goes to its HTTP (or HTTPS)
-// port. A test drives those two, publishes the Provider Profiles and Takeovers
+// TWO seams, and they are the two a tenant has. A handover — or a withdrawal
+// (spec §12.7) — is POSTed at the gateway's HANDOVER port, which is where its
+// connector forwards a sealed packet (spec §12.1); a request for a workload
+// goes to its HTTP (or HTTPS) port. A test drives those two, publishes the Provider Profiles and Takeovers
 // a gateway reads into the stub relay, and asserts on what the gateway
 // ANSWERED and what reached the stubs. Nothing asserts on what the gateway
 // holds internally: a test written that way passes when the gateway is broken
@@ -210,6 +210,15 @@ export async function startTestGateway({
         // a POST" sends none.
         body: method === 'GET' ? undefined : JSON.stringify(body),
       }),
+
+    /**
+     * Seal a Gateway Withdrawal to this gateway (spec §12.7).
+     *
+     * The SAME door a handover arrives at, because a tenant seals both to the
+     * one route this gateway's connector terminates: what says which message
+     * it is is the body's one key, and nothing else.
+     */
+    withdraw: (body, options = {}) => harness.handover(body, options),
 
     /** Wait until the gateway answers a hostname with something other than 503. */
     untilServed: (host) => until(async () => (await harness.get(host)).status !== 503, { what: `${host} to be served` }),

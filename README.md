@@ -255,9 +255,8 @@ and the grant is not carried to a provider afterwards, which would refuse it
 so a tenant that hands over a grant derived for a later moment is served again
 by that same act.
 
-A tenant that wants this gateway to stop serving a workload *before* its grant
-runs out sends a **Gateway Withdrawal** over the same sealed channel. That is
-a later ticket (TOON_Network#61) and is not implemented here yet.
+**A Gateway Withdrawal** takes a workload off this gateway *before* its grant
+runs out; it is the section below.
 
 ```
 Takeover created_at  ──2 × liveness_cadence_s──▶  ask every member  ──▶  the URL moves
@@ -268,6 +267,53 @@ So: after a Takeover a URL moves about one settle window after the claim was
 published, plus up to one `GATEWAY_FOLLOW_TICK_MS`; after a self-stop, an
 expiry or an eviction it stops being served within one cadence.
 
+## Taking a workload off this gateway
+
+A tenant seals a **Gateway Withdrawal** (spec §12.7) to the same route the
+handover went to, and this process stops serving that workload **at once**:
+
+```json
+{ "withdrawal": {
+    "workload_id": "…",
+    "expires_at":  1700086400,
+    "standby_set": [ { "provider": "<pubkey>", "grant": "<32 bytes, hex>" }, … ]
+} }
+```
+
+The members are spelled exactly as a handover spells them, because they are
+the same fact. `expires_at` says **which grant** the withdrawal bears — the
+moment the handover named — and it is **not** compared with the clock: a
+withdrawal of a grant that has already run out still frees the names that
+grant is still holding.
+
+**Bearing the grant is what makes it safe without a signature.** Nothing a
+tenant produces is signed any more, so this process cannot ask who sent a
+withdrawal. It asks something else, which is enough: a withdrawal must bear
+the grant this gateway is reading the lease with, and **only the holder of the
+lease's Continuation Token can derive that value**. The only other party that
+holds it is this gateway, whose withdrawing itself costs nobody anything. So
+a stranger cannot take any workload off any gateway, and a withdrawal bearing
+a wrong, stale or absent grant is **ignored and logged** — the workload goes
+on being served. The comparison is constant time, and a withdrawal for a
+workload this process does not hold reaches nobody at all: no provider is
+dialled and no relay is read to answer one.
+
+**A withdrawal ends serving, not reading.** The withdrawn gateway keeps a
+**working grant** until its `expires_at` and could still ask a provider for
+`status` with it — there is no revocation before expiry (spec §6.5.1), and
+nothing here claims otherwise. What ends, at once, is this process serving the
+workload: it stops forwarding it, stops following it, and gives up its
+readable name for the next grant that asks for it. An *expired* grant, by
+contrast, keeps its name until another claims it, so a tenant whose readable
+URL stopped working is told the grant expired rather than that the hostname
+means nothing here.
+
+| Answer | Means |
+|---|---|
+| `200 { workload_id, hostname, withdrawn: true }` | That hostname is no longer served here. The grant is untouched. |
+| `invalid_withdrawal` | It is not a withdrawal: a field no withdrawal names, or one of them malformed. |
+| `not_withdrawn` | This gateway is not serving that workload under the grant borne — a wrong or stale grant, or a workload it never held. Nothing changed and nobody was asked. |
+
 ## Configuration
 
 Environment only; there is no config file.
@@ -276,7 +322,7 @@ Environment only; there is no config file.
 |---|---|---|
 | `GATEWAY_DOMAIN` | — | **Required.** Every workload is served at `<canonical label>.<domain>`. Point a wildcard `*.<domain>` at this process. |
 | `GATEWAY_RELAYS` | — | **Required.** Comma-separated `ws://`/`wss://` relays, where this process looks for the Provider Profiles of the members a handover names and for the Takeovers that move a workload between them. |
-| `GATEWAY_HANDOVER_PORT` | — | **Required.** Where this gateway's connector forwards a sealed Gateway Handover, and the only way a tenant can tell this process to serve a workload. Its **own** listener, never a path on the ones that front workloads, because a reserved path would carve a hole out of every tenant's URL space. It should not be reachable from outside the connector. |
+| `GATEWAY_HANDOVER_PORT` | — | **Required.** Where this gateway's connector forwards a sealed Gateway Handover — and a sealed Gateway Withdrawal, which rides the same route — and the only way a tenant can tell this process to serve a workload or to stop. Its **own** listener, never a path on the ones that front workloads, because a reserved path would carve a hole out of every tenant's URL space. It should not be reachable from outside the connector. |
 | `GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY` | — | Paths to the certificate and key for `*.<GATEWAY_DOMAIN>`. Required unless `GATEWAY_HTTP_PORT` is set. |
 | `GATEWAY_HTTPS_PORT` | `443` | Where TLS is terminated. |
 | `GATEWAY_HTTP_PORT` | — | A plain-HTTP listener, for development or for a deployment terminating TLS in front. Set it or the certificate pair, or this process refuses to start. |
@@ -369,10 +415,12 @@ the member's `connector_url`. That is the body a provider reads once its
 connector has unsealed the envelope, and the path the wire fixtures record as
 `http_path`.
 
-The **sealed handover a tenant sends this gateway** arrives the same way from
+The **sealed messages a tenant sends this gateway** arrive the same way from
 the other side: the gateway's own connector unseals the envelope and forwards
 plain HTTP to `GATEWAY_HANDOVER_PORT`, so this process reads plaintext JSON
-and holds no sealing key of its own.
+and holds no sealing key of its own. A handover and a withdrawal are sealed to
+the one route that connector terminates, so both arrive at that one path, and
+the body's single key — `handover` or `withdrawal` — is what says which.
 
 **The limit of that, said plainly.** A connector that terminates
 `<addr>.status` expects a *sealed ILP packet* at its client edge, and answers
@@ -443,11 +491,13 @@ HTML page and the header all follow.
 |---|---|
 | `src/main.mjs` | The process: read the environment, refuse or start, handle signals. |
 | `src/config.mjs` | The configuration, and the refusal naming everything missing. |
-| `src/gateway.mjs` | The composition: listeners, the admission door, `stop()`. |
+| `src/gateway.mjs` | The composition: listeners, the tenant's door, `stop()`. |
 | `src/serve.mjs` | The request path: hostname → grant → the resolver seam, and the refusals. |
-| `src/admit.mjs` | Admission: the handover listener, the rate limit, the one bounded round. |
-| `src/grants.mjs` | The grants held: one per workload, replacement, the hostname index. |
-| `src/handover.mjs` | Reading one Gateway Handover, or saying which field is wrong. |
+| `src/door.mjs` | The tenant's door: the listener both sealed messages arrive at, and which of the two this body is. |
+| `src/admit.mjs` | Admission: the rate limit, and the one bounded round a handover is admitted on. |
+| `src/withdraw.mjs` | Withdrawal: the grant a withdrawal must bear, compared in constant time, and what it ends. |
+| `src/grants.mjs` | The grants held: one per workload, replacement, release, the hostname index. |
+| `src/handover.mjs` | Reading a Gateway Handover or a Gateway Withdrawal, or saying which field is wrong. |
 | `src/relays.mjs` | The relay pool: subscriptions that stay open. |
 | `src/profiles.mjs` | The Standby Set members' Profiles: connectors, Relay Sets, cadences. |
 | `src/resolve.mjs` | Resolution: ask every member, pick the running one, hold the target. |
@@ -504,8 +554,8 @@ is driven, against a stub member that checks a presented grant the way spec
 
 | Helper | Gives you |
 |---|---|
-| `tests/helpers/harness.mjs` | `startTestGateway`, `gateway.get(host)`, `gateway.handover(body)`, `gateway.publish(event)`, `admitAll`, `hostFor`, `untilServed`, `untilReason`, `until`. |
-| `tests/helpers/handover.mjs` | `gatewayHandover` and the tenant's two HKDFs (`continuationFor`, `gatewaySub`, `grantFrom`), plus `asProvider` — a member that checks a presented grant the way a provider does. |
+| `tests/helpers/harness.mjs` | `startTestGateway`, `gateway.get(host)`, `gateway.handover(body)`, `gateway.withdraw(body)`, `gateway.publish(event)`, `admitAll`, `hostFor`, `untilServed`, `untilReason`, `until`. |
+| `tests/helpers/handover.mjs` | `gatewayHandover`, `gatewayWithdrawal` and the tenant's two HKDFs (`continuationFor`, `gatewaySub`, `grantFrom`), plus `asProvider` — a member that checks a presented grant the way a provider does. |
 | `tests/helpers/stub-relay.mjs` | A NIP-01 relay: holds Profiles and Takeover events; `publish` reaches subscriptions already open; replaces replaceable events as a relay does. |
 | `tests/helpers/stub-connector.mjs` | A provider's connector answering `POST /status` (spec §6.5). `answerWith` to change the answer, `goSilent` for a member that never replies, `requests` for what it was asked and what grant it presented. |
 | `tests/helpers/stub-workload.mjs` | The tenant's application: records method, URL, headers, body and who connected, and echoes over WebSocket. |
