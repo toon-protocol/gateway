@@ -46,7 +46,7 @@ export function createHeldGrants({
   now = () => Math.floor(Date.now() / 1000),
   log = () => {},
 } = {}) {
-  /** @type {Map<string, ReturnType<typeof import('./handover.mjs').readHandover>>} workload id -> its handover */
+  /** @type {Map<string, ReturnType<typeof import('./messages.mjs').readHandover>>} workload id -> its handover */
   const held = new Map();
   /** @type {Map<string, string>} canonical hostname label -> workload id */
   const labels = new Map();
@@ -143,11 +143,9 @@ export function createHeldGrants({
      * §6.5.1). What ends here is this gateway serving the workload.
      */
     release(workloadId) {
-      if (!held.has(workloadId)) return false;
       held.delete(workloadId);
       labels.delete(canonicalLabel(workloadId));
       releaseNamesOf(workloadId);
-      return true;
     },
 
     /** The grant served at one hostname label, or `undefined`. */

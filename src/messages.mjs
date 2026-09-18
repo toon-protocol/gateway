@@ -40,11 +40,13 @@ import { isKey32 } from './nostr.mjs';
 export const HANDOVER_PATH = '/handover';
 
 /**
- * The most members one handover may name.
+ * The most members one sealed message may name.
  *
  * It is the amplification bound (spec §12.1): one sealed packet buys one free
  * `status` per member named, so without a cap a stranger could name a thousand
- * providers and have this gateway send a thousand requests for one packet.
+ * providers and have this gateway send a thousand requests for one packet. A
+ * withdrawal asks nobody, and is held to the same bound because there is no
+ * reason for it to name more members than the handover it undoes.
  */
 export const MAX_STANDBY_SET = 16;
 
@@ -58,6 +60,20 @@ const isLabel = (value) =>
 const HANDOVER_KEYS = ['workload_id', 'standby_set', 'http_port', 'expires_at', 'name'];
 const WITHDRAWAL_KEYS = ['workload_id', 'standby_set', 'expires_at'];
 const MEMBER_KEYS = ['provider', 'grant'];
+
+/**
+ * Whether this body NAMES a withdrawal.
+ *
+ * It lives beside the keys themselves, because which key names which message
+ * is one fact and the door that routes on it must not hold a second copy
+ * (`src/door.mjs`). It answers only which READER to hand the body to; whether
+ * the body is a withdrawal at all is that reader's answer, which is why a body
+ * carrying `withdrawal` AND something else comes here rather than going to
+ * admission: a sender that said "withdrawal" is told what is wrong with its
+ * withdrawal.
+ */
+export const namesWithdrawal = (body) =>
+  body !== null && typeof body === 'object' && !Array.isArray(body) && Object.hasOwn(body, 'withdrawal');
 
 /**
  * The one message under `key`, or throw saying what is wrong.
@@ -100,8 +116,8 @@ function readMembers(members) {
   }
   if (members.length > MAX_STANDBY_SET) {
     throw new Error(
-      `its \`standby_set\` names ${members.length} members; this gateway asks at most ` +
-        `${MAX_STANDBY_SET} from one handover`,
+      `its \`standby_set\` names ${members.length} members; one sealed message may name at ` +
+        `most ${MAX_STANDBY_SET} (spec §12.1)`,
     );
   }
 

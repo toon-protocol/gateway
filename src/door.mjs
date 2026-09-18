@@ -13,11 +13,14 @@
 // is neither is not a message this gateway knows, and is refused as a
 // malformed handover rather than guessed at.
 //
-// NOTHING IS DECIDED HERE. This module reads bytes and routes them: whether a
-// handover is admitted is `src/admit.mjs`, and whether a withdrawal bears the
-// grant in force is `src/withdraw.mjs`. Both answer in the error shape of §5.
+// NOTHING ABOUT A GRANT IS DECIDED HERE. This module reads bytes, routes them
+// and writes the answer back: whether a handover is admitted is
+// `src/admit.mjs`, and whether a withdrawal bears the grant in force is
+// `src/withdraw.mjs`. What an answer at this door LOOKS like is this module's,
+// which is why `refuse` — the error shape of §5, exactly two keys — lives here
+// and both of them build their refusals with it.
 
-import { HANDOVER_PATH } from './handover.mjs';
+import { HANDOVER_PATH, namesWithdrawal } from './messages.mjs';
 
 /** A refusal, in the error shape of spec §5 — exactly two keys. */
 export const refuse = (status, error, message) => ({ status, body: { error, message } });
@@ -34,14 +37,6 @@ export const refuse = (status, error, message) => ({ status, body: { error, mess
 export function createTenantDoor({ admission, withdrawals, log = () => {} }) {
   /** Nothing sealed to a gateway is large; a bigger body is not a message of this kind. */
   const MAX_BYTES = 64 * 1024;
-
-  /** Which message this body says it is, by its one key. */
-  const isWithdrawal = (body) =>
-    body !== null &&
-    typeof body === 'object' &&
-    !Array.isArray(body) &&
-    Object.keys(body).length === 1 &&
-    Object.keys(body)[0] === 'withdrawal';
 
   return (req, res) => {
     const answer = ({ status, body }) => {
@@ -66,7 +61,9 @@ export function createTenantDoor({ admission, withdrawals, log = () => {} }) {
       bytes += chunk.length;
       if (bytes > MAX_BYTES) {
         stopped = true;
-        answer(refuse(413, 'invalid_handover', 'that is far too large to be a handover'));
+        answer(
+          refuse(413, 'invalid_handover', 'that is far too large to be a handover or a withdrawal'),
+        );
         req.destroy();
         return;
       }
@@ -92,8 +89,23 @@ export function createTenantDoor({ admission, withdrawals, log = () => {} }) {
         return;
       }
       // A withdrawal asks nobody anything, so it is answered here and now.
-      if (isWithdrawal(body)) {
-        answer(withdrawals.withdraw(body));
+      if (namesWithdrawal(body)) {
+        try {
+          answer(withdrawals.withdraw(body));
+        } catch (e) {
+          // A bug here must not leave the request unanswered and must not take
+          // the process down with it: one sealed packet may never disturb the
+          // workloads already being served (spec §12.1).
+          log(`withdrawing threw: ${e instanceof Error ? e.stack : String(e)}`);
+          answer(
+            refuse(
+              503,
+              'withdrawal_failed',
+              'this gateway could not carry out a withdrawal just now; nothing was decided about ' +
+                'the workload, which may still be served here. Try again.',
+            ),
+          );
+        }
         return;
       }
       admission.admit(body).then(answer, (e) => {

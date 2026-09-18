@@ -179,6 +179,30 @@ describe('a withdrawal bearing the workload\'s current grant', () => {
     assert.equal(stub.asked, askedBefore, 'a withdrawn workload is not followed');
   });
 
+  it('says the workload was withdrawn, and claims no grant was revoked or expired', async (t) => {
+    // The documentation criterion, in the one place a gateway states it: a
+    // withdrawn grant is untouched and still works at its members until its
+    // moment passes, so a line saying it expired — or that it was revoked,
+    // which nothing here can do — would be a plain untruth (spec §6.5.1).
+    const stub = await member(t);
+    const gateway = await startTestGateway({
+      events: [stub.profile],
+      handovers: [handoverFor()],
+      env: { GATEWAY_FOLLOW_TICK_MS: '20' },
+    });
+    t.after(() => gateway.close());
+
+    assert.equal((await gateway.get(gateway.hostFor(WORKLOAD))).status, 200);
+    const answered = await gateway.withdraw(withdrawalFor());
+    await until(() => gateway.log.some((line) => /withdr/i.test(line)), {
+      what: 'the gateway to say it withdrew the workload',
+    });
+
+    const said = `${gateway.log.join('\n')}\n${answered.body}`;
+    assert.doesNotMatch(said, /revok/i, 'nothing here revokes a delegation');
+    assert.doesNotMatch(said, /expired/i, 'and the grant did not expire: it still works');
+  });
+
   it('is not refused because the moment its grant names has passed', async (t) => {
     // `expires_at` says WHICH grant the withdrawal bears; it is not compared
     // with the clock (spec §12.7). An expired grant is still holding the
@@ -271,6 +295,22 @@ describe('a withdrawal bearing anything else', () => {
       assert.equal(answered.json().error, 'invalid_withdrawal', JSON.stringify(body));
       assert.equal(answered.status, 400);
     }
+    assert.equal((await gateway.get(gateway.hostFor(WORKLOAD))).status, 200);
+  });
+
+  it('tells a body that named a withdrawal what is wrong with its withdrawal', async (t) => {
+    // `{ "withdrawal": …, <anything else> }` is not a withdrawal — but a sender
+    // that said "withdrawal" is told about the message it meant to send, not
+    // about a handover it never claimed to be sending.
+    const stub = await member(t);
+    const gateway = await startTestGateway({
+      events: [stub.profile],
+      handovers: [handoverFor()],
+    });
+    t.after(() => gateway.close());
+
+    const answered = await gateway.withdraw({ withdrawal: withdrawalFor().withdrawal, also: 1 });
+    assert.equal(answered.json().error, 'invalid_withdrawal');
     assert.equal((await gateway.get(gateway.hostFor(WORKLOAD))).status, 200);
   });
 });

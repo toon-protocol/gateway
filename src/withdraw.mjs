@@ -13,11 +13,13 @@
 // withdrawal bearing anything else is IGNORED AND LOGGED, and the workload
 // goes on being served.
 //
-// The comparison is CONSTANT TIME. The grant is a secret on the same terms as
-// the token it derives from (spec §6.1.1), and a comparison that returned
-// early would let somebody who can send packets learn it a byte at a time.
-// Every member the withdrawal and this gateway both name is compared, and none
-// of them short-circuits.
+// THE GRANTS ARE COMPARED IN CONSTANT TIME, which is the one comparison here
+// that is about a secret. The grant is a secret on the same terms as the token
+// it derives from (spec §6.1.1), and a comparison that returned early on the
+// first differing byte would let somebody who can send packets learn it a byte
+// at a time. Nothing else here is hidden and nothing else pretends to be: that
+// this gateway holds a workload at all is plain from asking its hostname
+// (§12.3), and which members it holds for one is what the sender named.
 //
 // A WITHDRAWAL ENDS SERVING, NOT READING. The withdrawn gateway keeps a
 // working grant until its `expires_at`, and could still ask a provider for
@@ -34,8 +36,8 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 
 import { refuse } from './door.mjs';
-import { readWithdrawal } from './handover.mjs';
 import { hostnameFor } from './hostname.mjs';
+import { readWithdrawal } from './messages.mjs';
 
 /**
  * Whether `withdrawal` bears the grant `held` is being read with, for any
@@ -55,7 +57,9 @@ function bearsCurrentGrant(held, withdrawal) {
     // compare; it is not a mismatch, and the members it does hold still decide.
     if (current === undefined || borne === undefined) continue;
     // Both are 64 hex characters, checked when they were read, so the two
-    // buffers are always 32 bytes and `timingSafeEqual` never throws.
+    // buffers are always 32 bytes and `timingSafeEqual` never throws. Every
+    // member named is compared, with no early return on a match either: what
+    // must not leak is WHERE two grants differ.
     if (timingSafeEqual(Buffer.from(current, 'hex'), Buffer.from(borne, 'hex'))) matches += 1;
   }
   return matches > 0;
@@ -78,9 +82,12 @@ export function createWithdrawals({ grants, onWithdrawn = () => {}, domain, log 
      * @returns {{ status: number, body: object }}
      */
     withdraw(body) {
-      // Every refusal below names the withdrawal by a number of this gateway's
-      // own, never by anything the sender chose: a workload id in a log line
-      // is a workload id a stranger can put there.
+      // Every line below names this withdrawal by a number of this gateway's
+      // own, so that two withdrawals naming one workload are tellable apart in
+      // a log and nothing a sender chose is what identifies them. The workload
+      // id is logged beside it because an operator needs to know what the
+      // message was about — as what the sender CLAIMED, which is all it is
+      // until a grant is borne for it.
       const attempt = randomUUID().slice(0, 8);
 
       let withdrawal;

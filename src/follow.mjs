@@ -207,17 +207,24 @@ export function createFollower({
         .map((grant) => [grant.workloadId, grant]),
     );
 
-    // A grant that ran out: this gateway may no longer read that lease, so it
-    // stops watching, stops asking, and forgets where the workload was. An
-    // expired grant is not carried to a provider, which would refuse it
-    // `bad_grant` (spec §6.5.1) and rightly.
+    // A workload that is no longer followed: its grant ran out, or its tenant
+    // withdrew it (spec §12.7). Either way this gateway stops watching, stops
+    // asking, and forgets where the workload was. An expired grant is not
+    // carried to a provider, which would refuse it `bad_grant` (spec §6.5.1)
+    // and rightly.
     for (const [workloadId, followed] of following) {
       if (held.has(workloadId)) continue;
       followed.subscription.close();
       following.delete(workloadId);
       if (resolver.forget(workloadId)) {
+        // Which of the two it was is asked rather than assumed: a withdrawn
+        // workload's grant is untouched and still works at its members, and a
+        // line saying it expired would be a plain untruth about a tenant's
+        // delegation.
+        const why =
+          grants.heldFor(workloadId) === undefined ? 'its tenant withdrew it' : 'its grant expired';
         log(
-          `workload ${workloadId} is no longer served: its grant expired. Forgetting where it ` +
+          `workload ${workloadId} is no longer served: ${why}. Forgetting where it ` +
             'was running',
         );
       }

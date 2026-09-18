@@ -33,7 +33,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { refuse } from './door.mjs';
-import { readHandover } from './handover.mjs';
+import { readHandover } from './messages.mjs';
 import { hostnameFor } from './hostname.mjs';
 
 /** How many admission rounds one member may be asked for in a minute. */

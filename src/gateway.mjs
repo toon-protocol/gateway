@@ -23,9 +23,9 @@ import { createHeldGrants } from './grants.mjs';
 import { createProfiles } from './profiles.mjs';
 import { createRelayPool } from './relays.mjs';
 import { createResolver } from './resolve.mjs';
-import { createWithdrawals } from './withdraw.mjs';
 import { withDialRewrites } from './rewrite.mjs';
 import { createRequestHandler } from './serve.mjs';
+import { createWithdrawals } from './withdraw.mjs';
 
 const listen = (server, port, address) =>
   new Promise((resolve, reject) => {
@@ -158,9 +158,9 @@ export async function startGateway({
   // where a sealed Gateway Handover (spec §12.1) and a sealed Gateway
   // Withdrawal (§12.7) arrive. It fronts no workload, so no tenant's URL space
   // is carved into (§12.5).
-  const handovers = createHttpServer(createTenantDoor({ admission, withdrawals, log }));
-  servers.push(handovers);
-  const handoverPort = await listen(handovers, config.handoverPort, config.bindAddress);
+  const door = createHttpServer(createTenantDoor({ admission, withdrawals, log }));
+  servers.push(door);
+  const handoverPort = await listen(door, config.handoverPort, config.bindAddress);
   log(`listening for Gateway Handovers and Withdrawals on ${config.bindAddress}:${handoverPort}`);
 
   return {

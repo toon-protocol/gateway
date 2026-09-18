@@ -313,6 +313,7 @@ means nothing here.
 | `200 { workload_id, hostname, withdrawn: true }` | That hostname is no longer served here. The grant is untouched. |
 | `invalid_withdrawal` | It is not a withdrawal: a field no withdrawal names, or one of them malformed. |
 | `not_withdrawn` | This gateway is not serving that workload under the grant borne — a wrong or stale grant, or a workload it never held. Nothing changed and nobody was asked. |
+| `withdrawal_failed` | This process could not carry one out at all. Nothing was decided, and the workload may still be served here. |
 
 ## Configuration
 
@@ -497,7 +498,7 @@ HTML page and the header all follow.
 | `src/admit.mjs` | Admission: the rate limit, and the one bounded round a handover is admitted on. |
 | `src/withdraw.mjs` | Withdrawal: the grant a withdrawal must bear, compared in constant time, and what it ends. |
 | `src/grants.mjs` | The grants held: one per workload, replacement, release, the hostname index. |
-| `src/handover.mjs` | Reading a Gateway Handover or a Gateway Withdrawal, or saying which field is wrong. |
+| `src/messages.mjs` | Reading a Gateway Handover or a Gateway Withdrawal, or saying which field is wrong. |
 | `src/relays.mjs` | The relay pool: subscriptions that stay open. |
 | `src/profiles.mjs` | The Standby Set members' Profiles: connectors, Relay Sets, cadences. |
 | `src/resolve.mjs` | Resolution: ask every member, pick the running one, hold the target. |

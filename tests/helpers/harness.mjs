@@ -23,7 +23,7 @@ import { readFileSync } from 'node:fs';
 
 import { readConfig } from '../../src/config.mjs';
 import { startGateway } from '../../src/gateway.mjs';
-import { HANDOVER_PATH } from '../../src/handover.mjs';
+import { HANDOVER_PATH } from '../../src/messages.mjs';
 import { canonicalLabel } from '../../src/hostname.mjs';
 import { CONSTANTS } from './events.mjs';
 import { startStubRelay } from './stub-relay.mjs';
