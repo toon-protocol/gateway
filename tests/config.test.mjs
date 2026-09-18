@@ -7,11 +7,10 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 
+import { ADMIT_PER_MINUTE } from '../src/admit.mjs';
 import { readConfig } from '../src/config.mjs';
 import { FOLLOW_TICK_MS } from '../src/follow.mjs';
-import { CONSTANTS } from './helpers/events.mjs';
 
-const SECRET = CONSTANTS.gateway.secret_key;
 const files = { '/tls/cert.pem': 'CERT BYTES', '/tls/key.pem': 'KEY BYTES' };
 const readFile = (path) => {
   if (!Object.hasOwn(files, path)) throw new Error(`ENOENT: no such file, open '${path}'`);
@@ -19,9 +18,9 @@ const readFile = (path) => {
 };
 
 const complete = {
-  GATEWAY_SECRET_KEY: SECRET,
   GATEWAY_DOMAIN: 'gw.example',
   GATEWAY_RELAYS: 'ws://relay.one:7100, ws://relay.two:7100',
+  GATEWAY_HANDOVER_PORT: '7300',
   GATEWAY_TLS_CERT: '/tls/cert.pem',
   GATEWAY_TLS_KEY: '/tls/key.pem',
 };
@@ -40,8 +39,8 @@ describe('readConfig', () => {
   it('reads a complete production configuration', () => {
     const config = read(complete);
     assert.equal(config.domain, 'gw.example');
-    assert.equal(config.publicKey, CONSTANTS.gateway.public_key);
     assert.deepEqual(config.relays, ['ws://relay.one:7100', 'ws://relay.two:7100']);
+    assert.equal(config.handoverPort, 7300);
     assert.equal(config.tls.cert, 'CERT BYTES');
     assert.equal(config.tls.key, 'KEY BYTES');
     assert.equal(config.httpsPort, 443);
@@ -49,11 +48,12 @@ describe('readConfig', () => {
     assert.equal(config.socksProxy, undefined);
   });
 
-  it('keeps the secret key out of anything that gets logged', () => {
+  it('asks for no key at all: a gateway signs nothing and publishes nothing', () => {
+    // Spec §12.1. What identifies this gateway to a tenant is the connector
+    // the handover is sealed to, not a Nostr key it would have nothing to do
+    // with — so there is none to leak, and none to configure.
     const config = read(complete);
-    assert.doesNotMatch(JSON.stringify(config), new RegExp(SECRET));
-    assert.doesNotMatch(String(config), new RegExp(SECRET));
-    assert.equal(config.secretKey(), SECRET, 'and still hands it to whatever signs');
+    assert.doesNotMatch(JSON.stringify(Object.keys(config)), /secret|publicKey/i);
   });
 
   it('lowercases the domain, because DNS does', () => {
@@ -62,9 +62,9 @@ describe('readConfig', () => {
 
   it('runs a plain HTTP listener for development in place of TLS', () => {
     const config = read({
-      GATEWAY_SECRET_KEY: SECRET,
       GATEWAY_DOMAIN: 'gw.example',
       GATEWAY_RELAYS: 'ws://relay.one:7100',
+      GATEWAY_HANDOVER_PORT: '7300',
       GATEWAY_HTTP_PORT: '8080',
     });
     assert.equal(config.httpPort, 8080);
@@ -79,16 +79,16 @@ describe('readConfig', () => {
 
   it('names every missing required key at once, not one per restart', () => {
     const why = refusal({});
-    for (const key of ['GATEWAY_SECRET_KEY', 'GATEWAY_DOMAIN', 'GATEWAY_RELAYS']) {
+    for (const key of ['GATEWAY_DOMAIN', 'GATEWAY_RELAYS', 'GATEWAY_HANDOVER_PORT']) {
       assert.match(why, new RegExp(key), key);
     }
   });
 
   it('refuses a gateway with nothing to listen on, naming both ways out', () => {
     const why = refusal({
-      GATEWAY_SECRET_KEY: SECRET,
       GATEWAY_DOMAIN: 'gw.example',
       GATEWAY_RELAYS: 'ws://relay.one:7100',
+      GATEWAY_HANDOVER_PORT: '7300',
     });
     assert.match(why, /GATEWAY_TLS_CERT/);
     assert.match(why, /GATEWAY_HTTP_PORT/);
@@ -103,11 +103,6 @@ describe('readConfig', () => {
     assert.match(refusal({ ...complete, GATEWAY_TLS_CERT: '/tls/missing.pem' }), /\/tls\/missing\.pem/);
   });
 
-  it('refuses a secret key that is not a Nostr key', () => {
-    assert.match(refusal({ ...complete, GATEWAY_SECRET_KEY: 'hunter2' }), /GATEWAY_SECRET_KEY/);
-    assert.match(refusal({ ...complete, GATEWAY_SECRET_KEY: 'nsec1abc' }), /hex/);
-  });
-
   it('refuses a relay that is not a websocket URL', () => {
     assert.match(refusal({ ...complete, GATEWAY_RELAYS: 'https://relay.one' }), /GATEWAY_RELAYS/);
   });
@@ -119,6 +114,21 @@ describe('readConfig', () => {
   it('refuses a port that is not a port', () => {
     assert.match(refusal({ ...complete, GATEWAY_HTTPS_PORT: 'https' }), /GATEWAY_HTTPS_PORT/);
     assert.match(refusal({ ...complete, GATEWAY_HTTP_PORT: '70000' }), /GATEWAY_HTTP_PORT/);
+    assert.match(refusal({ ...complete, GATEWAY_HANDOVER_PORT: 'seal' }), /GATEWAY_HANDOVER_PORT/);
+  });
+});
+
+describe('how often one provider can be made to admit a handover', () => {
+  // Anyone can seal a handover naming any provider, so one sealed packet buys
+  // one free `status` per member it names (spec §12.1).
+  it('defaults to a bounded rate, and takes a number a minute', () => {
+    assert.equal(read(complete).admitPerMinute, ADMIT_PER_MINUTE);
+    assert.equal(read({ ...complete, GATEWAY_ADMIT_PER_MINUTE: '2' }).admitPerMinute, 2);
+  });
+
+  it('refuses a rate that is not a number of admissions', () => {
+    assert.match(refusal({ ...complete, GATEWAY_ADMIT_PER_MINUTE: 'lots' }), /GATEWAY_ADMIT_PER_MINUTE/);
+    assert.match(refusal({ ...complete, GATEWAY_ADMIT_PER_MINUTE: '0' }), /GATEWAY_ADMIT_PER_MINUTE/);
   });
 });
 

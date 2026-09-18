@@ -1,21 +1,19 @@
-// The harness itself, proven at the seams the rest of Milestone 5 uses.
+// The harness itself, proven at the seams the gateway tests use.
 //
-// Read this file first if you are writing M5-4, M5-5 or M5-6: each test here
-// is the smallest working example of one thing the harness gives you.
+// Read this file first if you are writing a gateway test: each test here is
+// the smallest working example of one thing the harness gives you.
 
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import { request as httpRequest } from 'node:http';
 
-import { K_TAKEOVER } from '../src/kinds.mjs';
-import { CONSTANTS, gatewayGrant, providerProfile, takeover } from './helpers/events.mjs';
-import { startTestGateway, until } from './helpers/harness.mjs';
+import { K_PROFILE, K_TAKEOVER } from '../src/kinds.mjs';
+import { CONSTANTS, providerProfile, takeover } from './helpers/events.mjs';
+import { gatewayHandover, grantFrom } from './helpers/handover.mjs';
+import { admitAll, startTestGateway, until } from './helpers/harness.mjs';
 import { running, startStubConnector } from './helpers/stub-connector.mjs';
 import { startStubWorkload } from './helpers/stub-workload.mjs';
-import { signEvent } from '../src/nostr.mjs';
-import { K_LEASE_REQUEST } from '../src/kinds.mjs';
 
-const GATEWAY = CONSTANTS.gateway;
 const WORKLOAD = 'aa'.repeat(32);
 
 const post = (url, body) =>
@@ -35,10 +33,11 @@ const post = (url, body) =>
   });
 
 describe('the stub provider connector', () => {
-  // M5-4 starts one of these per Standby Set member and tells each what to
-  // answer. This is the whole shape of a granted `status` (spec §6.5).
-  it('answers a `status` a gateway signed, carrying the grant, as a provider would', async (t) => {
-    const grant = gatewayGrant({ workloadId: WORKLOAD, gateway: GATEWAY.public_key, httpPort: 8080 });
+  // Resolution starts one of these per Standby Set member and tells each what
+  // to answer. This is the whole shape of a delegated `status` (spec §6.5.1).
+  it('answers a `status` presenting a Gateway Grant, as a provider would', async (t) => {
+    const expiresAt = CONSTANTS.now + 86_400;
+    const grant = grantFrom(CONSTANTS.tenant.root_secret, CONSTANTS.provider.public_key, expiresAt);
     const connector = await startStubConnector({
       pubkey: CONSTANTS.provider.public_key,
       answer: ({ workloadId }) =>
@@ -46,12 +45,14 @@ describe('the stub provider connector', () => {
     });
     t.after(() => connector.close());
 
-    const request = signEvent(GATEWAY.secret_key, {
-      kind: K_LEASE_REQUEST,
-      created_at: CONSTANTS.now,
-      tags: [['p', CONSTANTS.provider.public_key], ['op', 'status'], ['expiration', String(CONSTANTS.now + 60)]],
-      content: JSON.stringify({ workload_id: WORKLOAD, grant }),
-    });
+    const request = {
+      request_id: 'ab'.repeat(32),
+      op: 'status',
+      provider: CONSTANTS.provider.public_key,
+      expiration: CONSTANTS.now + 60,
+      continuation: grant,
+      content: { workload_id: WORKLOAD, gateway_expires_at: expiresAt },
+    };
     const answered = await post(`${connector.url}/status`, { request });
 
     assert.equal(answered.status, 200);
@@ -60,25 +61,27 @@ describe('the stub provider connector', () => {
 
     const [recorded] = connector.requests;
     assert.equal(recorded.path, '/status');
-    assert.equal(recorded.signer, GATEWAY.public_key, 'the GATEWAY signs, not the tenant');
-    assert.equal(recorded.grant.id, grant.id, 'and carries the grant inside its content');
+    assert.equal(recorded.continuation, grant, 'the grant rides in `continuation`');
+    assert.equal(recorded.gatewayExpiresAt, expiresAt, 'naming the moment it was derived for');
+    assert.equal(recorded.request.sig, undefined, 'and nobody signed it');
   });
 
   it('can answer anything a member might answer, or nothing at all', async (t) => {
     const connector = await startStubConnector({ pubkey: CONSTANTS.provider.public_key });
     t.after(() => connector.close());
 
+    const asking = { request: { content: {} } };
     // Default: a workload this provider never leased.
-    assert.equal((await post(`${connector.url}/status`, { request: { content: '{}' } })).json.error, 'unknown_workload');
+    assert.equal((await post(`${connector.url}/status`, asking)).json.error, 'unknown_workload');
 
     connector.answerWith(() => ({ workload_id: WORKLOAD, role: 'standby', state: 'reserved', expires_at: CONSTANTS.now + 3600 }));
-    assert.equal((await post(`${connector.url}/status`, { request: { content: '{}' } })).json.state, 'reserved');
+    assert.equal((await post(`${connector.url}/status`, asking)).json.state, 'reserved');
 
-    // A member that connects and never replies: M5-4's `member_unreachable`.
+    // A member that connects and never replies: `member_unreachable`.
     connector.goSilent();
     await assert.rejects(
       Promise.race([
-        post(`${connector.url}/status`, { request: { content: '{}' } }),
+        post(`${connector.url}/status`, asking),
         new Promise((_, reject) => setTimeout(() => reject(new Error('no answer')), 100)),
       ]),
       /no answer/,
@@ -115,7 +118,8 @@ describe('the stub workload', () => {
       });
 
     const gateway = await startTestGateway({
-      events: [gatewayGrant({ workloadId: WORKLOAD, gateway: GATEWAY.public_key })],
+      handovers: [gatewayHandover({ workloadId: WORKLOAD })],
+      probe: admitAll,
       resolve: forward,
     });
     t.after(() => gateway.close());
@@ -175,15 +179,30 @@ describe('the stub relay', () => {
     assert.equal(JSON.parse(seen[0].content).connector_url, connector.url);
   });
 
-  it('replaces an addressable event the way a relay does', async (t) => {
+  it('replaces a replaceable event the way a relay does', async (t) => {
     const gateway = await startTestGateway({});
     t.after(() => gateway.close());
 
-    const first = gatewayGrant({ workloadId: WORKLOAD, gateway: GATEWAY.public_key, createdAt: CONSTANTS.now });
-    const later = gatewayGrant({ workloadId: WORKLOAD, gateway: GATEWAY.public_key, createdAt: CONSTANTS.now + 10 });
+    const first = providerProfile({ connectorUrl: 'http://one.example', createdAt: CONSTANTS.now });
+    const later = providerProfile({ connectorUrl: 'http://two.example', createdAt: CONSTANTS.now + 10 });
     assert.equal(gateway.publish(first), true);
     assert.equal(gateway.publish(later), true);
-    assert.equal(gateway.relay.events.filter((e) => e.kind === later.kind).length, 1);
+    assert.equal(gateway.relay.events.filter((e) => e.kind === K_PROFILE).length, 1);
     assert.equal(gateway.publish(first), false, 'an older one is refused, as a relay refuses it');
+  });
+});
+
+describe('the handover port', () => {
+  // The other seam a tenant has: where this gateway's connector forwards a
+  // sealed Gateway Handover (spec §12.1). A test that is about something
+  // downstream of admission passes `admitAll` and gets one admitted with no
+  // member asked.
+  it('admits a handover and answers where the workload is now served', async (t) => {
+    const gateway = await startTestGateway({ probe: admitAll });
+    t.after(() => gateway.close());
+
+    const answered = await gateway.handover(gatewayHandover({ workloadId: WORKLOAD }));
+    assert.equal(answered.status, 200);
+    assert.equal(answered.json().hostname, gateway.hostFor(WORKLOAD));
   });
 });

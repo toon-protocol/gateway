@@ -9,12 +9,11 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import { request as httpsRequest } from 'node:https';
 
-import { CONSTANTS, gatewayGrant } from './helpers/events.mjs';
-import { DOMAIN, startTestGateway } from './helpers/harness.mjs';
+import { gatewayHandover } from './helpers/handover.mjs';
+import { DOMAIN, admitAll, startTestGateway } from './helpers/harness.mjs';
 
-const GATEWAY = CONSTANTS.gateway.public_key;
 const WORKLOAD = 'aa'.repeat(32);
-const grantFor = () => gatewayGrant({ workloadId: WORKLOAD, gateway: GATEWAY });
+const handoverFor = () => gatewayHandover({ workloadId: WORKLOAD });
 
 /** @type {import('../src/serve.mjs').Resolver} */
 const served = async ({ grant, res }) => {
@@ -43,7 +42,7 @@ const overTls = ({ port, host }) =>
 
 describe('TLS', () => {
   it('serves a granted workload over HTTPS with the configured certificate', async (t) => {
-    const gateway = await startTestGateway({ events: [grantFor()], tls: true, http: false, resolve: served });
+    const gateway = await startTestGateway({ handovers: [handoverFor()], probe: admitAll, tls: true, http: false, resolve: served });
     t.after(() => gateway.close());
 
     assert.equal(gateway.httpPort, null, 'no plain listener unless one was asked for');
@@ -63,7 +62,7 @@ describe('TLS', () => {
   });
 
   it('runs the plain development listener beside TLS when both are configured', async (t) => {
-    const gateway = await startTestGateway({ events: [grantFor()], tls: true, http: true, resolve: served });
+    const gateway = await startTestGateway({ handovers: [handoverFor()], probe: admitAll, tls: true, http: true, resolve: served });
     t.after(() => gateway.close());
 
     assert.ok(gateway.httpPort, 'a development listener');

@@ -8,23 +8,26 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 
-import { CONSTANTS, gatewayGrant, providerProfile } from './helpers/events.mjs';
-import { startTestGateway } from './helpers/harness.mjs';
+import { CONSTANTS, providerProfile } from './helpers/events.mjs';
+import { gatewayHandover } from './helpers/handover.mjs';
+import { admitAll, startTestGateway } from './helpers/harness.mjs';
 import { refusal, running, startStubConnector } from './helpers/stub-connector.mjs';
 import { startStubRelay } from './helpers/stub-relay.mjs';
 import { startStubWorkload } from './helpers/stub-workload.mjs';
 
-const GATEWAY = CONSTANTS.gateway.public_key;
 const MEMBER = CONSTANTS.provider;
 const WORKLOAD = 'aa'.repeat(32);
 const OTHER_WORKLOAD = 'bb'.repeat(32);
 const HTTP_PORT = 8080;
 
-/** A grant for a one-member Standby Set: everything else here is about the answer. */
-const grantFor = (overrides = {}) =>
-  gatewayGrant({
+/**
+ * A handover for a one-member Standby Set: everything else here is about the
+ * answer, so admission is stubbed (`admitAll`) and what these tests drive is
+ * §12.4's round and what a tenant is told about it.
+ */
+const handoverFor = (overrides = {}) =>
+  gatewayHandover({
     workloadId: WORKLOAD,
-    gateway: GATEWAY,
     httpPort: HTTP_PORT,
     standbySet: [MEMBER.public_key],
     ...overrides,
@@ -55,7 +58,7 @@ describe('when no member is running the workload', () => {
       expires_at: CONSTANTS.now + 3600,
     }));
 
-    const gateway = await startTestGateway({ events: [grantFor(), profile] });
+    const gateway = await startTestGateway({ events: [profile], handovers: [handoverFor()], probe: admitAll });
     t.after(() => gateway.close());
 
     const answered = await gateway.get(gateway.hostFor(WORKLOAD));
@@ -72,7 +75,7 @@ describe('when no member is running the workload', () => {
       expires_at: CONSTANTS.now - 10,
     }));
 
-    const gateway = await startTestGateway({ events: [grantFor(), profile] });
+    const gateway = await startTestGateway({ events: [profile], handovers: [handoverFor()], probe: admitAll });
     t.after(() => gateway.close());
 
     assert.equal(
@@ -91,7 +94,7 @@ describe('when a member tells this gateway nothing', () => {
       refusal('bad_grant', 'that grant does not admit you here'),
     );
 
-    const gateway = await startTestGateway({ events: [grantFor(), profile] });
+    const gateway = await startTestGateway({ events: [profile], handovers: [handoverFor()], probe: admitAll });
     t.after(() => gateway.close());
 
     const answered = await gateway.get(gateway.hostFor(WORKLOAD));
@@ -103,7 +106,8 @@ describe('when a member tells this gateway nothing', () => {
     // The grant names a member; no Profile of that member is on any relay, so
     // there is nowhere to ask it anything.
     const gateway = await startTestGateway({
-      events: [grantFor()],
+      handovers: [handoverFor()],
+      probe: admitAll,
       env: { GATEWAY_RESOLVE_TIMEOUT_MS: '250' },
     });
     t.after(() => gateway.close());
@@ -120,7 +124,9 @@ describe('when the member cannot be reached', () => {
     connector.goSilent();
 
     const gateway = await startTestGateway({
-      events: [grantFor(), profile],
+      events: [profile],
+      handovers: [handoverFor()],
+      probe: admitAll,
       env: { GATEWAY_RESOLVE_TIMEOUT_MS: '250' },
     });
     t.after(() => gateway.close());
@@ -139,7 +145,7 @@ describe('when the member cannot be reached', () => {
 
     const { profile } = await member(t, runningAt(deadPort));
 
-    const gateway = await startTestGateway({ events: [grantFor(), profile] });
+    const gateway = await startTestGateway({ events: [profile], handovers: [handoverFor()], probe: admitAll });
     t.after(() => gateway.close());
 
     const answered = await gateway.get(gateway.hostFor(WORKLOAD));
@@ -164,18 +170,20 @@ describe('a readable name', () => {
       }),
     );
 
-    const mine = grantFor({ name: 'shop' });
-    const theirs = gatewayGrant({
+    const mine = handoverFor({ name: 'shop' });
+    const theirs = gatewayHandover({
       workloadId: OTHER_WORKLOAD,
-      gateway: GATEWAY,
       httpPort: HTTP_PORT,
       standbySet: [MEMBER.public_key],
       name: 'shop',
-      createdAt: CONSTANTS.now + 10,
     });
 
-    // `mine` is on the relay first, so it is the grant that claimed the name.
-    const gateway = await startTestGateway({ events: [mine, theirs, profile] });
+    // `mine` is admitted first, so it is the grant that claimed the name.
+    const gateway = await startTestGateway({
+      events: [profile],
+      handovers: [mine, theirs],
+      probe: admitAll,
+    });
     t.after(() => gateway.close());
 
     // The name belongs to the grant that claimed it first.
@@ -209,7 +217,9 @@ describe('a readable name', () => {
 
     let clock = CONSTANTS.now;
     const gateway = await startTestGateway({
-      events: [grantFor({ name: 'shop', expiresAt: CONSTANTS.now + 100 }), profile],
+      events: [profile],
+      handovers: [handoverFor({ name: 'shop', expiresAt: CONSTANTS.now + 100 })],
+      probe: admitAll,
       now: () => clock,
     });
     t.after(() => gateway.close());
@@ -223,14 +233,13 @@ describe('a readable name', () => {
     assert.equal((await gateway.get(named)).headers['toon-gateway-reason'], 'grant_expired');
 
     // And now another tenant may have it: the claim it lost was its priority.
-    gateway.publish(
-      gatewayGrant({
+    await gateway.handover(
+      gatewayHandover({
         workloadId: OTHER_WORKLOAD,
-        gateway: GATEWAY,
         httpPort: HTTP_PORT,
         standbySet: [MEMBER.public_key],
         name: 'shop',
-        createdAt: CONSTANTS.now + 200,
+        expiresAt: CONSTANTS.now + 9999,
       }),
     );
 
@@ -244,7 +253,9 @@ describe('a readable name', () => {
     const { profile } = await member(t, runningAt(workload.port));
 
     const gateway = await startTestGateway({
-      events: [grantFor({ name: 'not a label' }), profile],
+      events: [profile],
+      handovers: [handoverFor({ name: 'not a label' })],
+      probe: admitAll,
     });
     t.after(() => gateway.close());
 
@@ -286,7 +297,11 @@ describe('a member\'s own Relay Set', () => {
       relays: [theirs.url],
     });
 
-    const gateway = await startTestGateway({ events: [grantFor(), announcement] });
+    const gateway = await startTestGateway({
+      events: [announcement],
+      handovers: [handoverFor()],
+      probe: admitAll,
+    });
     t.after(() => gateway.close());
 
     await gateway.untilServed(gateway.hostFor(WORKLOAD));

@@ -8,7 +8,6 @@ import { describe, it } from 'node:test';
 import { readConfig } from '../src/config.mjs';
 import { createDialer } from '../src/dial.mjs';
 import { readDialRewrites, rewriteTarget, withDialRewrites } from '../src/rewrite.mjs';
-import { CONSTANTS } from './helpers/events.mjs';
 import { startStubSocks } from './helpers/stub-socks.mjs';
 
 describe('readDialRewrites', () => {
@@ -122,9 +121,9 @@ describe('withDialRewrites', () => {
 
 describe('readConfig with GATEWAY_DIAL_REWRITE', () => {
   const complete = {
-    GATEWAY_SECRET_KEY: CONSTANTS.gateway.secret_key,
     GATEWAY_DOMAIN: 'gw.example',
     GATEWAY_RELAYS: 'ws://relay.one:7100',
+    GATEWAY_HANDOVER_PORT: '0',
     GATEWAY_HTTP_PORT: '0',
   };
 

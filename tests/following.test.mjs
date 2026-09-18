@@ -15,16 +15,17 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 
 import { DEFAULT_LIVENESS_CADENCE_S } from '../src/follow.mjs';
-import { CONSTANTS, gatewayGrant, providerProfile, takeover } from './helpers/events.mjs';
-import { startTestGateway, until } from './helpers/harness.mjs';
+import { CONSTANTS, providerProfile, takeover } from './helpers/events.mjs';
+import { gatewayHandover } from './helpers/handover.mjs';
+import { admitAll, startTestGateway, until } from './helpers/harness.mjs';
 import { running, startStubConnector } from './helpers/stub-connector.mjs';
 import { startStubRelay } from './helpers/stub-relay.mjs';
 import { startStubWorkload } from './helpers/stub-workload.mjs';
 
-const GATEWAY = CONSTANTS.gateway.public_key;
 const PRIMARY = CONSTANTS.primary_provider;
 const STANDBY = CONSTANTS.standby_provider;
-const STRANGER = CONSTANTS.other_tenant;
+/** A key the handover's `standby_set` does not name: nobody's claim to make. */
+const STRANGER = CONSTANTS.publisher;
 const WORKLOAD = 'aa'.repeat(32);
 const HTTP_PORT = 8080;
 
@@ -102,11 +103,10 @@ async function member(t, key, { body, relays = [], cadence = CADENCE, state = 'r
   return stub;
 }
 
-/** A grant for a two-member Standby Set, primary first. */
-const grantFor = (overrides = {}) =>
-  gatewayGrant({
+/** A handover for a two-member Standby Set, primary first. */
+const handoverFor = (overrides = {}) =>
+  gatewayHandover({
     workloadId: WORKLOAD,
-    gateway: GATEWAY,
     httpPort: HTTP_PORT,
     standbySet: [PRIMARY.public_key, STANDBY.public_key],
     ...overrides,
@@ -135,7 +135,9 @@ describe('a Takeover', () => {
 
     let clock = CONSTANTS.now;
     const gateway = await startTestGateway({
-      events: [grantFor(), primary.profile, standby.profile],
+      events: [primary.profile, standby.profile],
+      handovers: [handoverFor()],
+      probe: admitAll,
       now: () => clock,
       env: FOLLOWS_FAST,
     });
@@ -188,7 +190,9 @@ describe('a Takeover', () => {
 
     let clock = CONSTANTS.now;
     const gateway = await startTestGateway({
-      events: [grantFor(), primary.profile, standby.profile],
+      events: [primary.profile, standby.profile],
+      handovers: [handoverFor()],
+      probe: admitAll,
       now: () => clock,
       env: FOLLOWS_FAST,
     });
@@ -233,7 +237,9 @@ describe('a Takeover', () => {
 
     let clock = CONSTANTS.now;
     const gateway = await startTestGateway({
-      events: [grantFor(), primary.profile, standby.profile],
+      events: [primary.profile, standby.profile],
+      handovers: [handoverFor()],
+      probe: admitAll,
       now: () => clock,
       env: FOLLOWS_FAST,
     });
@@ -261,7 +267,7 @@ describe('a Takeover', () => {
     });
   });
 
-  it('ignores a claim signed by a key the grant does not name', async (t) => {
+  it('ignores a claim signed by a key the handover does not name', async (t) => {
     const theirs = await startStubRelay({});
     t.after(() => theirs.close());
 
@@ -274,7 +280,9 @@ describe('a Takeover', () => {
 
     let clock = CONSTANTS.now;
     const gateway = await startTestGateway({
-      events: [grantFor(), primary.profile, standby.profile],
+      events: [primary.profile, standby.profile],
+      handovers: [handoverFor()],
+      probe: admitAll,
       now: () => clock,
       env: FOLLOWS_FAST,
     });
@@ -284,8 +292,9 @@ describe('a Takeover', () => {
     assert.equal((await gateway.get(host)).body, 'the primary\'s copy');
 
     // Anybody may publish a kind 30433 with this `d`. Only a member of the
-    // Standby Set may claim the workload (spec §7.1), so this one changes
-    // nothing — and in particular does not hold up the per-cadence re-ask.
+    // Standby Set the handover names may claim the workload (spec §7.1), so
+    // this one changes nothing — and in particular does not hold up the
+    // per-cadence re-ask.
     theirs.publish(takeover({ standbySecret: STRANGER.secret_key, workloadId: WORKLOAD }));
     await untilLogged(gateway, /ignored a Takeover claim/);
 
@@ -316,14 +325,13 @@ describe('a Takeover', () => {
 
     let clock = CONSTANTS.now;
     const gateway = await startTestGateway({
-      events: [
-        grantFor({
+      events: [primary.profile, standby.profile, third.profile],
+      handovers: [
+        handoverFor({
           standbySet: [PRIMARY.public_key, STANDBY.public_key, CONSTANTS.provider.public_key],
         }),
-        primary.profile,
-        standby.profile,
-        third.profile,
       ],
+      probe: admitAll,
       now: () => clock,
       env: FOLLOWS_FAST,
     });
@@ -369,7 +377,9 @@ describe('a Takeover', () => {
 
     const clock = CONSTANTS.now;
     const gateway = await startTestGateway({
-      events: [grantFor(), primary.profile, standby.profile],
+      events: [primary.profile, standby.profile],
+      handovers: [handoverFor()],
+      probe: admitAll,
       now: () => clock,
       env: FOLLOWS_FAST,
     });
@@ -402,7 +412,9 @@ describe('the per-cadence re-ask', () => {
 
     let clock = CONSTANTS.now;
     const gateway = await startTestGateway({
-      events: [grantFor({ standbySet: [PRIMARY.public_key] }), primary.profile],
+      events: [primary.profile],
+      handovers: [handoverFor({ standbySet: [PRIMARY.public_key] })],
+      probe: admitAll,
       now: () => clock,
       env: FOLLOWS_FAST,
     });
@@ -429,7 +441,9 @@ describe('the per-cadence re-ask', () => {
 
     let clock = CONSTANTS.now;
     const gateway = await startTestGateway({
-      events: [grantFor(), primary.profile, standby.profile],
+      events: [primary.profile, standby.profile],
+      handovers: [handoverFor()],
+      probe: admitAll,
       now: () => clock,
       env: FOLLOWS_FAST,
     });
@@ -453,7 +467,9 @@ describe('the per-cadence re-ask', () => {
 
     let clock = CONSTANTS.now;
     const gateway = await startTestGateway({
-      events: [grantFor({ standbySet: [PRIMARY.public_key] }), primary.profile],
+      events: [primary.profile],
+      handovers: [handoverFor({ standbySet: [PRIMARY.public_key] })],
+      probe: admitAll,
       now: () => clock,
       env: { ...FOLLOWS_FAST, GATEWAY_RESOLVE_TIMEOUT_MS: '250' },
     });
@@ -484,7 +500,9 @@ describe('a primary Profile that states no cadence', () => {
 
     let clock = CONSTANTS.now;
     const gateway = await startTestGateway({
-      events: [grantFor({ standbySet: [PRIMARY.public_key] }), primary.profile],
+      events: [primary.profile],
+      handovers: [handoverFor({ standbySet: [PRIMARY.public_key] })],
+      probe: admitAll,
       now: () => clock,
       env: FOLLOWS_FAST,
     });
@@ -510,7 +528,9 @@ describe('the last known target', () => {
 
     let clock = CONSTANTS.now;
     const gateway = await startTestGateway({
-      events: [grantFor({ standbySet: [PRIMARY.public_key] }), primary.profile],
+      events: [primary.profile],
+      handovers: [handoverFor({ standbySet: [PRIMARY.public_key] })],
+      probe: admitAll,
       now: () => clock,
       env: { ...FOLLOWS_FAST, GATEWAY_RESOLVE_TIMEOUT_MS: '2000' },
     });
@@ -558,7 +578,9 @@ describe('the last known target', () => {
     // The standby's Profile is on NO relay: the re-resolution the Takeover
     // triggers will wait for it until the resolve timeout.
     const gateway = await startTestGateway({
-      events: [grantFor(), primary.profile],
+      events: [primary.profile],
+      handovers: [handoverFor()],
+      probe: admitAll,
       now: () => clock,
       env: { ...FOLLOWS_FAST, GATEWAY_RESOLVE_TIMEOUT_MS: '1500' },
     });
@@ -593,10 +615,9 @@ describe('a grant that runs out', () => {
 
     let clock = CONSTANTS.now;
     const gateway = await startTestGateway({
-      events: [
-        grantFor({ standbySet: [PRIMARY.public_key], expiresAt: CONSTANTS.now + 100 }),
-        primary.profile,
-      ],
+      events: [primary.profile],
+      handovers: [handoverFor({ standbySet: [PRIMARY.public_key], expiresAt: CONSTANTS.now + 100 })],
+      probe: admitAll,
       now: () => clock,
       env: FOLLOWS_FAST,
     });
@@ -619,15 +640,14 @@ describe('a grant that runs out', () => {
     );
   });
 
-  it('starts again when its tenant republishes it, with no restart', async (t) => {
+  it('starts again when its tenant hands over a later grant, with no restart', async (t) => {
     const primary = await member(t, PRIMARY, { body: 'the primary\'s copy', state: 'running' });
 
     let clock = CONSTANTS.now;
     const gateway = await startTestGateway({
-      events: [
-        grantFor({ standbySet: [PRIMARY.public_key], expiresAt: CONSTANTS.now + 100 }),
-        primary.profile,
-      ],
+      events: [primary.profile],
+      handovers: [handoverFor({ standbySet: [PRIMARY.public_key], expiresAt: CONSTANTS.now + 100 })],
+      probe: admitAll,
       now: () => clock,
       env: FOLLOWS_FAST,
     });
@@ -637,77 +657,10 @@ describe('a grant that runs out', () => {
     clock = CONSTANTS.now + 101;
     await gateway.untilReason(host, 'grant_expired');
 
-    gateway.publish(
-      grantFor({
-        standbySet: [PRIMARY.public_key],
-        createdAt: CONSTANTS.now + 101,
-        expiresAt: CONSTANTS.now + 3600,
-      }),
+    await gateway.handover(
+      handoverFor({ standbySet: [PRIMARY.public_key], expiresAt: CONSTANTS.now + 3600 }),
     );
     await gateway.untilServed(host);
     assert.equal((await gateway.get(host)).body, 'the primary\'s copy');
-  });
-});
-
-describe('a grant that names another gateway', () => {
-  it('withdraws the workload, though the rotation names that other gateway in its `p` tag', async (t) => {
-    const primary = await member(t, PRIMARY, { body: 'the primary\'s copy', state: 'running' });
-
-    const gateway = await startTestGateway({
-      events: [grantFor({ standbySet: [PRIMARY.public_key] }), primary.profile],
-      env: FOLLOWS_FAST,
-    });
-    t.after(() => gateway.close());
-
-    const host = gateway.hostFor(WORKLOAD);
-    assert.equal((await gateway.get(host)).status, 200);
-
-    // The tenant rotated to another gateway. That grant's `p` tag names the
-    // OTHER gateway, so §12.1's filter cannot carry it; the watch on the
-    // workload id is what delivers it.
-    gateway.publish(
-      grantFor({
-        standbySet: [PRIMARY.public_key],
-        gateway: 'cc'.repeat(32),
-        createdAt: CONSTANTS.now + 10,
-      }),
-    );
-
-    await gateway.untilReason(host, 'no_grant');
-    const askedBefore = primary.asked;
-    await new Promise((done) => setTimeout(done, 100));
-    assert.equal(primary.asked, askedBefore, 'and it is not followed any more either');
-  });
-
-  it('does not let a grant signed by somebody else take a workload away', async (t) => {
-    const primary = await member(t, PRIMARY, { body: 'the primary\'s copy', state: 'running' });
-
-    const gateway = await startTestGateway({
-      events: [grantFor({ standbySet: [PRIMARY.public_key] }), primary.profile],
-      env: FOLLOWS_FAST,
-    });
-    t.after(() => gateway.close());
-
-    const host = gateway.hostFor(WORKLOAD);
-    assert.equal((await gateway.get(host)).status, 200);
-
-    // A stranger's grant for somebody else's workload id, naming another
-    // gateway and dated later. Only the tenant of the grant held may replace
-    // it, or anyone at all could take any workload off any gateway.
-    gateway.publish(
-      grantFor({
-        tenantSecret: STRANGER.secret_key,
-        standbySet: [PRIMARY.public_key],
-        gateway: 'cc'.repeat(32),
-        createdAt: CONSTANTS.now + 10,
-      }),
-    );
-
-    await new Promise((done) => setTimeout(done, 150));
-    assert.equal((await gateway.get(host)).status, 200, 'the tenant\'s own grant still stands');
-    assert.ok(
-      gateway.log.some((line) => /tenant/i.test(line)),
-      `it said why it ignored the stranger's grant; the log was:\n${gateway.log.join('\n')}`,
-    );
   });
 });

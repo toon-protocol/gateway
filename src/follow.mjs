@@ -35,12 +35,16 @@
 // WHAT IT DOES NOT DO. It never drops a target itself on the strength of a
 // Takeover or a cadence — only a FINISHED resolution changes or withdraws one
 // (`src/resolve.mjs`), so nothing here takes a healthy workload offline while
-// a slow relay or a slow member is still being waited for. The two things it
-// does forget are a grant that ran out and a workload rotated to another
-// gateway, because in both cases this gateway has lost the authority to ask.
+// a slow relay or a slow member is still being waited for. The one thing it
+// does forget is a grant that ran out, because this gateway has then lost the
+// authority to ask about that lease at all.
+//
+// A TAKEOVER IS THE ONLY EVENT IT WATCHES FOR. A gateway no longer reads a
+// relay on a workload's account for anything else (spec §12.1): there is no
+// grant to find, and a tenant that wants this gateway to stop serving a
+// workload sends it a Gateway Withdrawal rather than publishing anything.
 
-import { canonicalLabel } from './hostname.mjs';
-import { K_GATEWAY_GRANT, K_TAKEOVER } from './kinds.mjs';
+import { K_TAKEOVER } from './kinds.mjs';
 import { tagValue, verifyEvent } from './nostr.mjs';
 
 /**
@@ -106,9 +110,6 @@ export function createFollower({
    */
   /** @type {Map<string, Followed>} workload id -> what is known about following it */
   const following = new Map();
-  /** The one subscription that can deliver a grant rotating a workload away. */
-  /** @type {{ ids: string[], subscription: { close: () => void } } | null} */
-  let rotation = null;
   /** @type {NodeJS.Timeout | null} */
   let timer = null;
   let queued = false;
@@ -194,30 +195,7 @@ export function createFollower({
     );
   };
 
-  /**
-   * The one subscription that can deliver a grant rotating a workload AWAY.
-   *
-   * Such a grant names the other gateway in its `p` tag, so §12.1's `#p`
-   * filter never carries it: it is found on the workload ids this gateway
-   * holds, on the relays it is configured with — which is where this tenant
-   * published the grant that brought the workload here.
-   */
-  const syncRotation = (ids) => {
-    if (rotation !== null && sameList(rotation.ids, ids)) return;
-    rotation?.subscription.close();
-    rotation = null;
-    if (ids.length === 0) return;
-    rotation = {
-      ids,
-      subscription: pool.subscribe({
-        relays,
-        filters: [{ kinds: [K_GATEWAY_GRANT], '#d': ids }],
-        onEvent: (event) => offer(event),
-      }),
-    };
-  };
-
-  /** Follow what is held now: the grants, their Takeover watches, the rotations. */
+  /** Follow what is held now: the grants and their Takeover watches. */
   const sync = () => {
     if (closed) return;
     const at = now();
@@ -229,21 +207,18 @@ export function createFollower({
         .map((grant) => [grant.workloadId, grant]),
     );
 
-    // A workload rotated away, or a grant that ran out: this gateway may no
-    // longer read that lease, so it stops watching, stops asking, and forgets
-    // where the workload was. An expired grant is not carried to a provider,
-    // which would refuse it `bad_grant` (spec §6.5) and rightly.
+    // A grant that ran out: this gateway may no longer read that lease, so it
+    // stops watching, stops asking, and forgets where the workload was. An
+    // expired grant is not carried to a provider, which would refuse it
+    // `bad_grant` (spec §6.5.1) and rightly.
     for (const [workloadId, followed] of following) {
       if (held.has(workloadId)) continue;
       followed.subscription.close();
       following.delete(workloadId);
       if (resolver.forget(workloadId)) {
         log(
-          `workload ${workloadId} is no longer served: ${
-            grants.find(canonicalLabel(workloadId)) === undefined
-              ? 'its grant names another gateway'
-              : 'its grant expired'
-          }. Forgetting where it was running`,
+          `workload ${workloadId} is no longer served: its grant expired. Forgetting where it ` +
+            'was running',
         );
       }
     }
@@ -274,8 +249,6 @@ export function createFollower({
       });
       log(`workload ${grant.workloadId}: watching ${want.join(', ')} for a Takeover`);
     }
-
-    syncRotation([...following.keys()].sort());
   };
 
   /** Re-sync after the events of one turn, rather than once per event. */
@@ -286,19 +259,6 @@ export function createFollower({
       queued = false;
       sync();
     });
-  };
-
-  /**
-   * Offer an event to the grants held, and follow whatever it changed.
-   *
-   * Every grant this gateway sees arrives through here — the `#p` filter of
-   * §12.1 and the rotation watch above — so that a grant taking a workload
-   * away takes its Takeover watch and its target with it.
-   */
-  const offer = (event) => {
-    const outcome = grants.offer(event);
-    scheduleSync();
-    return outcome;
   };
 
   const tick = () => {
@@ -328,8 +288,14 @@ export function createFollower({
   };
 
   return {
-    /** Offer a grant event, and follow what it changed. */
-    offer,
+    /**
+     * Follow what is held now.
+     *
+     * Admission calls it when a handover is accepted, so a workload starts
+     * being followed the moment it starts being served rather than on the
+     * next tick.
+     */
+    refresh: scheduleSync,
 
     /** Start following: watch what is held, and keep looking at the clock. */
     start() {
@@ -345,8 +311,6 @@ export function createFollower({
       timer = null;
       for (const followed of following.values()) followed.subscription.close();
       following.clear();
-      rotation?.subscription.close();
-      rotation = null;
     },
   };
 }

@@ -1,24 +1,26 @@
-// The gateway itself: listeners, the grants it holds, and the relays it
-// watches for more (spec §12, ADR 0013).
+// The gateway itself: listeners, the grants it holds, and the relays it reads
+// to reach the members those grants name (spec §12, ADR 0013).
 //
-// It holds no lease, pays for nothing and calls no paid route. Its whole
-// authority is the Gateway Grants tenants publish naming it, and it finds
-// those with ONE relay filter — kind 30438 with `#p` equal to its own public
-// key — so a tenant that wants a hostname publishes a grant and does nothing
-// else. Nobody has to make contact with this process.
+// It holds no lease, pays for nothing and calls no paid route, it signs
+// nothing and it publishes nothing. Its whole authority is a Gateway Grant,
+// and a grant reaches it in ONE SEALED PACKET a tenant sends its connector —
+// a Gateway Handover (spec §12.1). There is nothing to find on a relay, so
+// there is no filter for grants and no account for anybody: the tenant sends
+// one packet, this gateway asks the members whether the grant works, and that
+// is the whole of being told.
 //
 // It runs behind its own connector (ADR 0013); in this milestone that
-// connector terminates no paid route.
+// connector terminates no paid route, and what it forwards is the handover.
 
 import { createServer as createHttpServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 
+import { createAdmission, createAdmissionRate, createHandoverHandler } from './admit.mjs';
 import { createDialer } from './dial.mjs';
 import { createFollower } from './follow.mjs';
-import { K_GATEWAY_GRANT } from './kinds.mjs';
 import { createHeldGrants } from './grants.mjs';
 import { createProfiles } from './profiles.mjs';
-import { createRelayPool, grantFilter } from './relays.mjs';
+import { createRelayPool } from './relays.mjs';
 import { createResolver } from './resolve.mjs';
 import { withDialRewrites } from './rewrite.mjs';
 import { createRequestHandler } from './serve.mjs';
@@ -39,9 +41,14 @@ const listen = (server, port, address) =>
  * runs the real one: Profiles off the relays, `status` to every Standby Set
  * member, and forwarding to whichever is running the workload.
  *
+ * `probe` is the admission seam (`src/admit.mjs`): the one bounded round of
+ * `status` a handover is admitted on. Left out, this gateway runs the real
+ * one, which is the same round resolution runs.
+ *
  * @param {{
  *   config: ReturnType<typeof import('./config.mjs').readConfig>,
  *   resolve?: import('./serve.mjs').Resolver,
+ *   probe?: (handover: any) => Promise<{ told: number, target?: any }>,
  *   pool?: ReturnType<typeof createRelayPool>,
  *   now?: () => number,
  *   log?: (line: string) => void,
@@ -50,15 +57,15 @@ const listen = (server, port, address) =>
 export async function startGateway({
   config,
   resolve,
+  probe,
   pool,
   now = () => Math.floor(Date.now() / 1000),
   log = () => {},
 }) {
   const relays = pool ?? createRelayPool({ log });
-  const grants = createHeldGrants({ gatewayPubkey: config.publicKey, now, log });
+  const grants = createHeldGrants({ now, log });
   const profiles = createProfiles({ pool: relays, relays: config.relays, log });
   const resolver = createResolver({
-    secretKey: config.secretKey,
     profiles,
     dialer: withDialRewrites(createDialer({ socksProxy: config.socksProxy }), config.dialRewrites),
     now,
@@ -66,8 +73,7 @@ export async function startGateway({
     timeoutMs: config.resolveTimeoutMs,
   });
   // Following the workload: the Takeover watch, the per-cadence re-ask, and
-  // the two things that withdraw a workload (spec §12.7). Every grant event
-  // goes through it, so a rotation takes its Takeover watch with it.
+  // the grant that ran out (spec §12.7).
   const follower = createFollower({
     grants,
     profiles,
@@ -86,20 +92,15 @@ export async function startGateway({
     log,
   });
 
-  /** Resolves the first time a relay has sent everything it already held. */
-  let markCaughtUp = () => {};
-  const caughtUp = new Promise((done) => {
-    markCaughtUp = () => done(undefined);
-  });
-
-  const subscription = relays.subscribe({
-    relays: config.relays,
-    filters: [grantFilter(config.publicKey, K_GATEWAY_GRANT)],
-    onEvent: (event) => follower.offer(event),
-    onEose: (relay) => {
-      log(`relay ${relay}: caught up on grants`);
-      markCaughtUp();
-    },
+  const admission = createAdmission({
+    grants,
+    probe: probe ?? resolver.probe,
+    remember: resolver.remember,
+    onHeld: () => follower.refresh(),
+    domain: config.domain,
+    now,
+    log,
+    rate: createAdmissionRate({ perMinute: config.admitPerMinute }),
   });
 
   follower.start();
@@ -142,6 +143,14 @@ export async function startGateway({
     log(`listening for HTTP on ${config.bindAddress}:${httpPort} for *.${config.domain}`);
   }
 
+  // The admission door: its OWN listener, behind this gateway's connector,
+  // where a sealed Gateway Handover arrives (spec §12.1). It fronts no
+  // workload, so no tenant's URL space is carved into (§12.5).
+  const handovers = createHttpServer(createHandoverHandler({ admission, log }));
+  servers.push(handovers);
+  const handoverPort = await listen(handovers, config.handoverPort, config.bindAddress);
+  log(`listening for Gateway Handovers on ${config.bindAddress}:${handoverPort}`);
+
   return {
     config,
     /** The grants this gateway holds. */
@@ -150,15 +159,14 @@ export async function startGateway({
     pool: relays,
     /** The Standby Set members' Profiles: connectors, Relay Sets, cadences. */
     profiles,
-    /** Resolution: `resolveNow`, `current`, `forget`. */
+    /** Resolution: `resolveNow`, `probe`, `current`, `forget`. */
     resolver,
     httpPort,
     httpsPort,
-    /** Resolves once some relay has replayed the grants it already held. */
-    caughtUp: () => caughtUp,
+    /** Where a sealed Gateway Handover is forwarded to (spec §12.1). */
+    handoverPort,
 
     async stop() {
-      subscription.close();
       follower.close();
       profiles.close();
       resolver.close();

@@ -1,34 +1,43 @@
 // Asking one Standby Set member where the workload is (spec §6.5).
 //
-// This is the whole of what a Gateway Grant buys. The request is an ordinary
-// Lease Request (kind 4432, `op=status`, spec §6.1): signed by THIS GATEWAY's
-// own key, addressed to one member with one `p` tag, carrying the grant event
-// unmodified inside its content. The provider verifies the grant out of that
-// request alone and answers the gateway exactly what it would have answered
-// the tenant.
+// This is the whole of what a Gateway Grant buys, and it is also how a grant
+// is PROVEN: a gateway cannot check a handover against a signature, so it
+// sends one of these and sees whether the member takes it (`src/admit.mjs`).
+//
+// The request is an ordinary Lease Request (spec §6.1) and nobody signs it: a
+// plain JSON object naming one provider, with the derived grant riding in
+// `continuation` exactly where the lease's own token would ride, and the
+// moment it was derived for named in the content's `gateway_expires_at`
+// (§6.5.1). The provider recomputes the grant from the token it already
+// stores and answers the gateway exactly what it would have answered the
+// tenant. `request_id` is 32 fresh random bytes, which is what the provider's
+// replay set keys on, so every request is new even when the grant is not.
+//
+// THE GRANT IS A SECRET. It is what authority this gateway has, so it goes to
+// the members the handover names and nowhere else: never into a log line,
+// never into an error message, and never into an answer this gateway writes.
 //
 // CARRIAGE — a decision worth knowing about. `status` is a FREE route (spec
 // §5), so there is no payment to make and no claim to attach, and this gateway
 // holds no channel, no mnemonic and no wallet: it must never call a paid
-// route. What it sends is therefore the §6.1.1 packet body — `{ "request":
-// <event> }` — over plain HTTP to the member's connector at the `status` path,
-// which is the body a provider reads after its connector has unsealed the
-// envelope and the path the wire fixtures record as `http_path`.
+// route. What it sends is therefore the §6.1.2 packet body — `{ "request":
+// <request> }` — over plain HTTP to the member's connector at the `status`
+// path, which is the body a provider reads after its connector has unsealed
+// the envelope and the path the wire fixtures record as `http_path`.
 //
 // A deployment whose members sit behind a connector that terminates the sealed
 // ILP envelope needs that carriage instead, and ONLY this module changes: the
-// request, the signature and the grant are identical either way — what changes
-// is the carriage, not the request. That swap is not made here because it
-// would buy nothing (the route is free), would need the connector's
-// self-description and sealing key, and would put a payment client into a
-// process whose whole point is that it holds none.
+// request and the grant are identical either way — what changes is the
+// carriage, not the request. That swap is not made here because it would buy
+// nothing (the route is free), would need the connector's self-description and
+// sealing key, and would put a payment client into a process whose whole point
+// is that it holds none.
 
+import { randomBytes } from 'node:crypto';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 
 import { connectionOptions } from './dial.mjs';
-import { K_LEASE_REQUEST } from './kinds.mjs';
-import { signEvent } from './nostr.mjs';
 
 /** Where a connector forwards `<addr>.status` (spec §5; the provider's `STATUS_PATH`). */
 export const STATUS_PATH = '/status';
@@ -37,24 +46,22 @@ export const STATUS_PATH = '/status';
 export const REQUEST_TTL_S = 60;
 
 /**
- * The signed `status` a gateway sends one member, carrying its grant.
+ * The `status` a gateway sends one member, presenting its Gateway Grant.
  *
  * @param {{
- *   secretKey: string, member: string, workloadId: string,
- *   grantEvent: object, now: number, ttlS?: number,
+ *   member: string, workloadId: string, grant: string,
+ *   gatewayExpiresAt: number, now: number, ttlS?: number,
  * }} options
  */
-export function statusRequest({ secretKey, member, workloadId, grantEvent, now, ttlS = REQUEST_TTL_S }) {
-  return signEvent(secretKey, {
-    kind: K_LEASE_REQUEST,
-    created_at: now,
-    tags: [
-      ['p', member],
-      ['op', 'status'],
-      ['expiration', String(now + ttlS)],
-    ],
-    content: JSON.stringify({ workload_id: workloadId, grant: grantEvent }),
-  });
+export function statusRequest({ member, workloadId, grant, gatewayExpiresAt, now, ttlS = REQUEST_TTL_S }) {
+  return {
+    request_id: randomBytes(32).toString('hex'),
+    op: 'status',
+    provider: member,
+    expiration: now + ttlS,
+    continuation: grant,
+    content: { workload_id: workloadId, gateway_expires_at: gatewayExpiresAt },
+  };
 }
 
 /**

@@ -4,18 +4,20 @@
 // Image Registry and warns it off the Provider Directory, and this is neither.
 // It is the set of grants held, which is the words the spec uses.
 //
-// A grant is addressable on its workload id (spec §3.1.3), so there is at most
-// ONE grant per workload here and publishing again replaces it: renewal,
-// rotation and a change of Standby Set are all the same act. Which of two
-// grants for a workload is current is NIP-01's rule for a replaceable event —
-// the later `created_at`, and on a tie the lower id — so every gateway reading
-// the same relays holds the same grant whatever order the relays deliver in.
+// One grant per workload, because one handover per workload is what a gateway
+// can act on: a later handover that ADMISSION ACCEPTED replaces the one held,
+// and renewal, rotation of the grant's moment and a change of Standby Set are
+// all the same act. Nothing is compared here to decide which of two is
+// current — there is no `created_at` to compare and no signature to weigh —
+// because only the holder of the lease's Continuation Token can derive a grant
+// a member will accept (spec §6.5.1). Getting past admission IS the proof that
+// this handover's sender may replace what is held (spec §12.1).
 //
 // Whether a grant is IN FORCE is not asked here for the CANONICAL hostname:
 // `expires_at` is checked when a request arrives (`src/serve.mjs`), so an
 // expired grant can be answered with the reason that it expired rather than
-// with the reason that no grant exists, and so a grant renewed by its tenant
-// starts serving again with no restart and no timer (M5-5).
+// with the reason that no grant exists, and so a grant handed over again by
+// its tenant starts serving with no restart and no timer (M5-5).
 //
 // A readable `name` is the one thing decided here and not there, because it is
 // the one thing that is not derived: two tenants may ask for `shop`, and only
@@ -27,51 +29,31 @@
 // tenant can always derive, and both workloads keep it. A readable name is
 // therefore never ambiguous, and never worth racing for.
 
-import { readGrant } from './grant.mjs';
 import { canonicalLabel } from './hostname.mjs';
-
-/** NIP-01 replacement: later `created_at` wins, and a tie goes to the lower id. */
-const supersedes = (candidate, held) =>
-  candidate.created_at > held.created_at ||
-  (candidate.created_at === held.created_at && candidate.id < held.id);
 
 /**
  * @param {{
- *   gatewayPubkey: string,
  *   now?: () => number,
  *   log?: (line: string) => void,
- * }} options
+ * }} [options]
  */
 export function createHeldGrants({
-  gatewayPubkey,
   now = () => Math.floor(Date.now() / 1000),
   log = () => {},
-}) {
-  // The NEWEST grant seen per workload, whoever it names — including one that
-  // names another gateway. Forgetting those would let an older grant, replayed
-  // off a second relay, undo a tenant's rotation and put the workload back.
-  /** @type {Map<string, ReturnType<typeof readGrant>>} workload id -> grant */
-  const newest = new Map();
-  /** @type {Map<string, string>} canonical hostname label -> workload id, ours only */
+} = {}) {
+  /** @type {Map<string, ReturnType<typeof import('./handover.mjs').readHandover>>} workload id -> its handover */
+  const held = new Map();
+  /** @type {Map<string, string>} canonical hostname label -> workload id */
   const labels = new Map();
   /** @type {Map<string, string>} readable name -> the workload id that claimed it */
   const names = new Map();
-
-  const ours = gatewayPubkey.toLowerCase();
-  const isOurs = (grant) => grant !== undefined && grant.gateway === ours;
-
-  const ignore = (event, why) => {
-    log(`ignored a grant${event?.id ? ` ${event.id}` : ''}: ${why}`);
-    return { accepted: false, why };
-  };
 
   /**
    * The workload a readable name is served for, if any.
    *
    * A claim is checked when it is USED rather than kept on a timer: the holder
-   * may since have been rotated to another gateway, or published a grant that
-   * no longer asks for the name, and in either the name is free again with
-   * nothing to notice it.
+   * may since have handed over a grant that no longer asks for the name, and
+   * then the name is free again with nothing to notice it.
    *
    * An EXPIRED grant still holds its name. That is deliberate: a tenant whose
    * readable URL stopped working is told the grant expired, exactly as its
@@ -82,8 +64,8 @@ export function createHeldGrants({
   const nameHolder = (name) => {
     const workloadId = names.get(name);
     if (workloadId === undefined) return undefined;
-    const grant = newest.get(workloadId);
-    if (grant === undefined || !isOurs(grant) || grant.name !== name) {
+    const grant = held.get(workloadId);
+    if (grant === undefined || grant.name !== name) {
       names.delete(name);
       return undefined;
     }
@@ -103,17 +85,16 @@ export function createHeldGrants({
     if (grant.name === undefined) return;
     if (labels.has(grant.name) && labels.get(grant.name) !== grant.workloadId) {
       log(
-        `grant ${grant.event.id}: the name "${grant.name}" is the canonical hostname of workload ` +
-          `${labels.get(grant.name)}; workload ${grant.workloadId} keeps its canonical hostname only`,
+        `workload ${grant.workloadId}: the name "${grant.name}" is the canonical hostname of ` +
+          `workload ${labels.get(grant.name)}; it keeps its canonical hostname only`,
       );
       return;
     }
     const holder = nameHolder(grant.name);
-    if (holder !== undefined && holder !== grant.workloadId && newest.get(holder).inForceAt(now())) {
+    if (holder !== undefined && holder !== grant.workloadId && held.get(holder).inForceAt(now())) {
       log(
-        `grant ${grant.event.id}: the name "${grant.name}" is already held by workload ${holder}, ` +
-          `whose grant is still in force; workload ${grant.workloadId} keeps its canonical ` +
-          'hostname only',
+        `workload ${grant.workloadId}: the name "${grant.name}" is already held by workload ` +
+          `${holder}, whose grant is still in force; it keeps its canonical hostname only`,
       );
       return;
     }
@@ -122,71 +103,25 @@ export function createHeldGrants({
 
   return {
     /**
-     * Offer an event discovered on a relay.
+     * Serve a workload under a handover admission accepted.
      *
-     * Everything that is not a grant for us, or is older than what we hold, is
-     * logged and dropped: one bad event on one relay must never stop the other
-     * workloads being served.
+     * Only `src/admit.mjs` calls this, and only after one bounded round of
+     * `status` found a member that took the grant (spec §12.1). A handover
+     * that got no further than this gateway's own door never reaches here.
      */
-    offer(event) {
-      let grant;
-      try {
-        grant = readGrant(event);
-      } catch (e) {
-        return ignore(event, e instanceof Error ? e.message : String(e));
+    hold(handover) {
+      const label = canonicalLabel(handover.workloadId);
+      held.set(handover.workloadId, handover);
+      labels.set(label, handover.workloadId);
+      if (handover.nameProblem !== undefined) {
+        log(`workload ${handover.workloadId}: ${handover.nameProblem}`);
       }
-
-      const current = newest.get(grant.workloadId);
-      if (current !== undefined && current.event.id === grant.event.id) {
-        // The same grant off a second relay: the ordinary case, not an event
-        // worth a log line — several relays carry the same grant on purpose.
-        return { accepted: false, why: 'already held' };
-      }
-      if (current !== undefined && !supersedes(grant.event, current.event)) {
-        return ignore(event, `it does not supersede the grant known for ${grant.workloadId}`);
-      }
-      // ONLY THE TENANT REPLACES ITS OWN GRANT. A grant's whole authority is
-      // its signer — a provider honours one exactly when the lease's tenant
-      // signed it (spec §6.5) — so a grant signed by anybody else is not a
-      // later grant for this workload; it is another key's event with the same
-      // `d`. Taking it as a replacement would let a stranger withdraw any
-      // workload from any gateway by publishing one, now that a rotation is
-      // delivered on the workload id (spec §12.7).
-      if (current !== undefined && grant.tenant !== current.tenant) {
-        return ignore(
-          event,
-          `it is signed by ${grant.tenant}, who is not the tenant of the grant held for ` +
-            `${grant.workloadId} (${current.tenant})`,
-        );
-      }
-
-      const label = canonicalLabel(grant.workloadId);
-      newest.set(grant.workloadId, grant);
-
-      // A grant naming somebody else is how a tenant ROTATES away from this
-      // gateway: the newest grant for a workload decides, and if it is not
-      // ours we stop serving that workload rather than keep the old one.
-      //
-      // Such a grant names the new gateway in its `p` tag (spec §3.1.3), so the
-      // `#p` filter of §12.1 cannot carry it: what delivers it is the watch on
-      // the workload ids this gateway holds (`src/follow.mjs`, spec §12.7),
-      // which is also what stops following the workload afterwards.
-      if (!isOurs(grant)) {
-        releaseNamesOf(grant.workloadId);
-        if (labels.delete(label)) {
-          log(`workload ${grant.workloadId} was granted to another gateway; no longer served`);
-        }
-        return ignore(event, `it names another gateway (${grant.gateway})`);
-      }
-
-      labels.set(label, grant.workloadId);
-      if (grant.nameProblem !== undefined) log(`grant ${grant.event.id}: ${grant.nameProblem}`);
-      claimName(grant);
+      claimName(handover);
       log(
-        `holding a grant for workload ${grant.workloadId} at ` +
-          `${label}, until ${new Date(grant.expiresAt * 1000).toISOString()}`,
+        `holding a grant for workload ${handover.workloadId} at ` +
+          `${label}, until ${new Date(handover.expiresAt * 1000).toISOString()}`,
       );
-      return { accepted: true, grant };
+      return handover;
     },
 
     /** The grant served at one hostname label, or `undefined`. */
@@ -195,12 +130,12 @@ export function createHeldGrants({
       // so it is the one name that cannot be taken from a workload — not even
       // by another tenant's `name` that happens to spell the same label.
       const workloadId = labels.get(label) ?? nameHolder(label);
-      return workloadId === undefined ? undefined : newest.get(workloadId);
+      return workloadId === undefined ? undefined : held.get(workloadId);
     },
 
-    /** Every grant held for this gateway, for a resolver working through them. */
+    /** Every grant this gateway holds, for a resolver working through them. */
     all() {
-      return [...labels.values()].map((workloadId) => newest.get(workloadId));
+      return [...labels.values()].map((workloadId) => held.get(workloadId));
     },
 
     /** How many workloads this gateway is serving. */
