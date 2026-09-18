@@ -14,13 +14,13 @@ import { describe, it } from 'node:test';
 import WebSocket from 'ws';
 
 import { isAnyoneHost } from '../src/dial.mjs';
-import { CONSTANTS, gatewayGrant, providerProfile } from './helpers/events.mjs';
-import { startTestGateway, until } from './helpers/harness.mjs';
+import { CONSTANTS, providerProfile } from './helpers/events.mjs';
+import { gatewayHandover } from './helpers/handover.mjs';
+import { admitAll, startTestGateway, until } from './helpers/harness.mjs';
 import { running, startStubConnector } from './helpers/stub-connector.mjs';
 import { startStubSocks } from './helpers/stub-socks.mjs';
 import { startStubWorkload } from './helpers/stub-workload.mjs';
 
-const GATEWAY = CONSTANTS.gateway.public_key;
 const WORKLOAD = 'bb'.repeat(32);
 const HTTP_PORT = 8080;
 
@@ -109,8 +109,8 @@ async function member(t, { hidden, answer, body, relays = [] }) {
   };
 }
 
-const grantFor = (standbySet) =>
-  gatewayGrant({ workloadId: WORKLOAD, gateway: GATEWAY, httpPort: HTTP_PORT, standbySet });
+const handoverFor = (standbySet) =>
+  gatewayHandover({ workloadId: WORKLOAD, httpPort: HTTP_PORT, standbySet });
 
 /** Everything that reached a stub came in through `proxy`, and nothing came in any other way. */
 const cameThroughProxy = (proxy, records, what) => {
@@ -131,7 +131,7 @@ describe('a workload on a Hidden Provider', () => {
     t.after(() => proxy.close());
 
     const gateway = await startTestGateway({
-      events: [grantFor([HIDDEN.public_key]), hidden.profile],
+      events: [hidden.profile], handovers: [handoverFor([HIDDEN.public_key])], probe: admitAll,
       env: { TOON_SOCKS_PROXY: proxy.url },
     });
     t.after(() => gateway.close());
@@ -142,14 +142,13 @@ describe('a workload on a Hidden Provider', () => {
     assert.equal(answered.body, 'from behind the anon client');
 
     // `status` reached the connector by its NAME, through the proxy, and was
-    // the same request a public member gets: signed by the gateway, carrying
-    // the grant.
+    // the same request a public member gets: unsigned, presenting the grant.
     assert.ok(proxy.askedFor(CONNECTOR_NAME, 80), `the proxy was asked for ${CONNECTOR_NAME}:80; it saw ${JSON.stringify(proxy.destinations)}`);
     const [asked] = hidden.connector.requests;
     assert.equal(asked.path, '/status');
-    assert.equal(asked.signer, GATEWAY);
+    assert.equal(asked.request.sig, undefined, 'nobody signs a Lease Request');
     assert.equal(asked.content.workload_id, WORKLOAD);
-    assert.ok(asked.grant !== undefined, 'carrying the grant');
+    assert.ok(asked.continuation !== undefined, 'presenting the grant');
     cameThroughProxy(proxy, hidden.connector.requests, 'the hidden connector');
 
     // And the answer's `.anyone` access host was forwarded to through the
@@ -187,7 +186,7 @@ describe('a workload on a Hidden Provider', () => {
     t.after(() => proxy.close());
 
     const gateway = await startTestGateway({
-      events: [grantFor([HIDDEN.public_key]), hidden.profile],
+      events: [hidden.profile], handovers: [handoverFor([HIDDEN.public_key])], probe: admitAll,
       env: { TOON_SOCKS_PROXY: proxy.url },
     });
     t.after(() => gateway.close());
@@ -210,7 +209,7 @@ describe('a workload on a Hidden Provider', () => {
     t.after(() => proxy.close());
 
     const gateway = await startTestGateway({
-      events: [grantFor([PUBLIC.public_key, HIDDEN.public_key]), pub.profile, hidden.profile],
+      events: [pub.profile, hidden.profile], handovers: [handoverFor([PUBLIC.public_key, HIDDEN.public_key])], probe: admitAll,
       env: { TOON_SOCKS_PROXY: proxy.url },
     });
     t.after(() => gateway.close());
@@ -238,7 +237,7 @@ describe('a workload on a Hidden Provider', () => {
     t.after(() => proxy.close());
 
     const gateway = await startTestGateway({
-      events: [grantFor([PUBLIC.public_key, HIDDEN.public_key]), pub.profile, hidden.profile],
+      events: [pub.profile, hidden.profile], handovers: [handoverFor([PUBLIC.public_key, HIDDEN.public_key])], probe: admitAll,
       env: { TOON_SOCKS_PROXY: proxy.url },
     });
     t.after(() => gateway.close());
@@ -258,7 +257,7 @@ describe('a workload on a Hidden Provider', () => {
     const leaked = watchResolver(t);
     const hidden = await member(t, { hidden: true });
 
-    const gateway = await startTestGateway({ events: [grantFor([HIDDEN.public_key]), hidden.profile] });
+    const gateway = await startTestGateway({ events: [hidden.profile], handovers: [handoverFor([HIDDEN.public_key])], probe: admitAll });
     t.after(() => gateway.close());
 
     const answered = await gateway.get(gateway.hostFor(WORKLOAD));
@@ -272,13 +271,36 @@ describe('a workload on a Hidden Provider', () => {
     assert.deepEqual(leaked, [], 'and its name never reached the system resolver');
   });
 
+  it('refuses a HANDOVER naming a member at an `.anyone` connector with `no_proxy`, and dials nothing', async (t) => {
+    // Admission is a round of `status` like any other (spec §12.1), so it goes
+    // the same way: `no_proxy` precedes any attempt, and it is not collapsed
+    // into "no member took the grant" — the first is a fact about this
+    // gateway's configuration, the second about the grant (§12.3, §12.8).
+    const leaked = watchResolver(t);
+    const hidden = await member(t, { hidden: true });
+
+    const gateway = await startTestGateway({ events: [hidden.profile] });
+    t.after(() => gateway.close());
+
+    const answered = await gateway.handover(handoverFor([HIDDEN.public_key]));
+    assert.equal(answered.json().error, 'no_proxy');
+    assert.match(answered.json().message, /TOON_SOCKS_PROXY/);
+    assert.equal(hidden.connector.requests.length, 0, 'the connector was never reached');
+    assert.deepEqual(leaked, [], 'and its name never reached the system resolver');
+    assert.equal(
+      (await gateway.get(gateway.hostFor(WORKLOAD))).headers['toon-gateway-reason'],
+      'no_grant',
+      'and no workload was put on a hostname',
+    );
+  });
+
   it('answers `no_proxy` when a public member answers an `.anyone` access host and no proxy is configured', async (t) => {
     const leaked = watchResolver(t);
     // A public connector whose lease is at a hidden address: the `status` leg
     // is fine, and the forwarding leg is the one that needs the proxy.
     const pub = await member(t, { hidden: false, answer: runningAt(LEASE_NAME, 8081) });
 
-    const gateway = await startTestGateway({ events: [grantFor([PUBLIC.public_key]), pub.profile] });
+    const gateway = await startTestGateway({ events: [pub.profile], handovers: [handoverFor([PUBLIC.public_key])], probe: admitAll });
     t.after(() => gateway.close());
 
     const answered = await gateway.get(gateway.hostFor(WORKLOAD));
@@ -296,7 +318,7 @@ describe('a workload on a Hidden Provider', () => {
     t.after(() => proxy.close());
 
     const gateway = await startTestGateway({
-      events: [grantFor([HIDDEN.public_key]), hidden.profile],
+      events: [hidden.profile], handovers: [handoverFor([HIDDEN.public_key])], probe: admitAll,
       env: { TOON_SOCKS_PROXY: proxy.url },
     });
     t.after(() => gateway.close());

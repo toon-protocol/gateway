@@ -2,14 +2,17 @@
 //
 // A relay read is free (spec §5 prices the provider's routes, not a relay's
 // reads), so this gateway holds no lease, no channel and no money: it opens a
-// websocket, sends a REQ and listens. It stays listening — a grant renewed or
-// rotated by its tenant, and a Takeover announced by a standby (M5-5), both
-// arrive as an EVENT on a subscription that was already open, with nobody
-// telling this gateway to look again.
+// websocket, sends a REQ and listens. It stays listening — a member
+// republishing its Provider Profile, and a Takeover announced by a standby
+// (M5-5), both arrive as an EVENT on a subscription that was already open,
+// with nobody telling this gateway to look again.
+//
+// TWO THINGS ONLY (spec §12.1). A gateway reads a relay on a workload's
+// account for its members' Profiles and for a Takeover, and for nothing else:
+// a grant arrives in a sealed packet, so there is no grant filter here.
 //
 // Several relays carry the same events, so duplicates are ordinary: the same
-// event arrives once per relay and whatever consumes it must be idempotent
-// (`createGrantRegistry` is).
+// event arrives once per relay and whatever consumes it must be idempotent.
 
 import WebSocket from 'ws';
 
@@ -144,14 +147,4 @@ export function createRelayPool({ log = () => {}, reconnect = true } = {}) {
       connections.clear();
     },
   };
-}
-
-/**
- * The one filter that finds every Gateway Grant naming this gateway.
- *
- * `#p` is the gateway's own key, which is why no tenant has to make contact:
- * publishing the grant IS telling the gateway (spec §3.1.3).
- */
-export function grantFilter(gatewayPubkey, kind) {
-  return { kinds: [kind], '#p': [gatewayPubkey] };
 }

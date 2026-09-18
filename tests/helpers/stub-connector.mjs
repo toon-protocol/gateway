@@ -7,9 +7,13 @@
 // anything but `running` is simply not the target, and a member that answers
 // nothing is unreachable; both are ordinary here.
 //
-// It speaks plain HTTP `POST /status` with `{ "request": <event> }`, which is
-// the body a provider reads after its connector has unsealed the envelope
-// (spec §6.1.1) and the shape the wire fixtures record as `http_path`.
+// It speaks plain HTTP `POST /status` with `{ "request": <request> }`, which
+// is the body a provider reads after its connector has unsealed the envelope
+// (spec §6.1.2) and the shape the wire fixtures record as `http_path`. The
+// request is a plain JSON object that nobody signed, carrying the gateway's
+// Gateway Grant as its `continuation` and the moment it was derived for as
+// its content's `gateway_expires_at` (§6.5.1).
+//
 // A gateway that later buys its `status` through an ILP connector sends the
 // same body; what changes is the carriage, not the request.
 
@@ -33,7 +37,7 @@ export const running = ({ workloadId, host = '127.0.0.1', ports = [], sshPort = 
 /**
  * @param {{
  *   pubkey?: string,
- *   answer?: (context: { workloadId: string, request: object, grant: object | undefined, body: object }) => object | undefined,
+ *   answer?: (context: { workloadId: string, request: any, continuation: any, gatewayExpiresAt: any, body: any }) => object | undefined,
  *   silent?: boolean,
  * }} [options]
  *   `answer` returns the JSON body to send; returning `undefined` means the
@@ -41,7 +45,7 @@ export const running = ({ workloadId, host = '127.0.0.1', ports = [], sshPort = 
  *   connection and never replies — a member that cannot be reached in time.
  */
 export async function startStubConnector({ pubkey, answer, silent = false } = {}) {
-  /** @type {{ path: string, body: any, request: any, content: any, grant: any, signer: string | undefined, peer: { address: string, port: number } }[]} */
+  /** @type {{ path: string, body: any, request: any, content: any, continuation: any, gatewayExpiresAt: any, peer: { address: string, port: number } }[]} */
   const requests = [];
   let respond = answer ?? (() => undefined);
   let quiet = silent;
@@ -57,19 +61,15 @@ export async function startStubConnector({ pubkey, answer, silent = false } = {}
         /* recorded as null below */
       }
       const request = body?.request;
-      let content = null;
-      try {
-        content = request === undefined ? null : JSON.parse(request.content);
-      } catch {
-        /* recorded as null */
-      }
+      const content = request?.content ?? null;
       requests.push({
         path: req.url ?? '',
         body,
         request,
         content,
-        grant: content?.grant,
-        signer: request?.pubkey,
+        /** The Gateway Grant the gateway presented, where a token would ride. */
+        continuation: request?.continuation,
+        gatewayExpiresAt: content?.gateway_expires_at,
         // Who connected: a gateway directly, or a proxy on its behalf (M5-6).
         peer: peerOf(req),
       });
@@ -80,7 +80,8 @@ export async function startStubConnector({ pubkey, answer, silent = false } = {}
         respond({
           workloadId: content?.workload_id,
           request,
-          grant: content?.grant,
+          continuation: request?.continuation,
+          gatewayExpiresAt: content?.gateway_expires_at,
           body,
         }) ?? refusal('unknown_workload', 'this provider never leased that workload id');
       const payload = JSON.stringify(answered);

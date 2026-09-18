@@ -14,27 +14,60 @@ resolves that id to whichever provider is running it right now ([ADR 0013][adr13
 spec §12). The provider protocol gains nothing for it: no provider owns a
 domain, runs ACME, terminates TLS or holds a tenant's certificate key.
 
-**It holds no lease, pays for nothing and calls no paid route.** Its whole
-authority is the **Gateway Grant** (spec §3.1.3) — a tenant's signed,
-published delegation naming one gateway, one workload, the workload's HTTP
-port and its Standby Set, with an expiry. Reading a relay is free, and the
-grant is what a `status` request carries to be answered (spec §6.5).
+**It holds no lease, pays for nothing and calls no paid route, and it signs
+nothing and publishes nothing.** Its whole authority is the **Gateway Grant**
+(spec §6.5.1) — a value derived from the lease's Continuation Token that
+admits it to one workload's `status` until a moment the tenant chose, and to
+nothing else.
 
 ## How a workload arrives here
 
-Nobody makes contact with this process. A tenant publishes a Gateway Grant
-naming this gateway's public key, and this gateway finds it: **one** filter,
-kind `30438` with `#p` equal to its own key, on the relays it watches. A grant
-is addressable on its workload id, so publishing again under the same id
-**replaces** the one this gateway holds — renewal, rotation and a change of
-Standby Set are all the same act, and all take effect with no restart.
+A tenant seals **one packet** to this gateway's connector: a **Gateway
+Handover** (spec §12.1) carrying the workload id, the Standby Set with the
+primary first, which of the spawn's ports is the HTTP one, the moment the
+grants were derived for, a grant derived for *each* member, and an optional
+readable name. Nothing is published, so there is nothing to find on a relay
+and nobody holds an account here.
+
+**Admission is empirical, and that is the whole of it.** There is no signature
+to check any more, so this gateway checks a handover by **sending `status` to
+the members it names** and seeing whether they take the grant. Being sent
+something becomes proof precisely because only the holder of the lease's
+Continuation Token can derive a grant a provider will accept. It is **one
+bounded round, immediately**; a handover the members refuse is logged, the
+sender is told, and it is **dropped and never retried**.
 
 ```
-tenant  ──publish grant (kind 30438, p=<gateway>)──▶  relay
-                                                        │
-gateway ──REQ {kinds:[30438], "#p":["<gateway>"]}───────┘
-        ──serves https://<canonical>.<gateway-domain>/
+tenant  ──seal handover──▶  gateway connector  ──plain POST /handover──▶  gateway
+                                                                            │
+                                     ┌──────── one round of `status` ───────┘
+                                     ▼
+                         every member the handover names
+                                     │  accepted by one of them?
+                                     ▼
+                serves https://<canonical>.<gateway-domain>/
 ```
+
+A later handover that admission accepts **replaces** the one held: renewal,
+rotation of the grant's moment and a change of Standby Set are all the same
+act, and all take effect with no restart. Nothing is weighed to decide which
+of two is current, because getting past admission is already the proof.
+
+### Two consequences, written down rather than discovered
+
+**The amplification is about one to one.** Anyone can seal a handover naming
+any provider, so one sealed packet a stranger paid to deliver buys one free
+`status` to each member it names. Admission is therefore **rate-limited per
+member** (`GATEWAY_ADMIT_PER_MINUTE`) and a handover naming more than 16
+members is refused outright: a burst of unsolicited handovers cannot make this
+gateway exceed that rate against any one provider, however it is spread across
+workloads.
+
+**A gateway cannot allowlist tenants**, and that is a consequence of the design
+rather than an oversight. After Milestone 6 there is no tenant identity to put
+on a list: nothing is signed, nothing is published, and the sealed envelope is
+unauthenticated on purpose (ADR 0011). What can be bounded is the work one
+packet buys, which is what the rate limit does.
 
 ## The canonical hostname
 
@@ -66,11 +99,12 @@ Set. Each member's **Provider Profile** (spec §4.1) gives its `connector_url`
 and its Relay Set — a gateway looks for Profiles on the relays it is
 configured with, and then on the relays a Profile itself names, because a
 provider publishes to its *own* Relay Set. Every member is then sent `status`
-(spec §6.5) **at once**, each request signed by this gateway's own key and
-carrying the whole signed grant:
+(spec §6.5) **at once**, each request presenting the grant derived for *that*
+member — nobody signs anything:
 
 ```
-grant.standby_set  ──▶  Profile(member).connector_url  ──POST status──▶  member
+handover.standby_set ──▶ Profile(member).connector_url ──POST status──▶ member
+                         continuation = that member's grant
                                                        ◀── state, access ──
 ```
 
@@ -84,9 +118,9 @@ the point: a Takeover moves a workload with no tenant online to say so, so the
 member listed first is exactly the one that may no longer have it.
 
 The **target port** is the `host_port` of the `access.ports` entry whose
-`container_port` equals the grant's `http_port`. Not the first port, and not
-`ssh_port`: a workload commonly exposes several, the host ports are the
-provider's to choose, and `http_port` is in the grant precisely so that
+`container_port` equals the handover's `http_port`. Not the first port, and
+not `ssh_port`: a workload commonly exposes several, the host ports are the
+provider's to choose, and `http_port` is in the handover precisely so that
 nothing has to be guessed.
 
 ## What a forwarded request carries
@@ -128,7 +162,7 @@ one place either opens a connection:
 
 So a Standby Set mixing a public primary with a hidden standby works with no
 configuration beyond the proxy: each member is dialled the way its own
-address calls for, and nothing in the grant says which members are hidden.
+address calls for, and nothing in the handover says which members are hidden.
 
 An `.anyone` name is **never resolved or dialled directly**, under any
 circumstances. The name goes to the proxy *as a name* — `socks5h`, under which
@@ -155,12 +189,12 @@ Two things to know before pointing a hidden workload here:
   workload's existence and its traffic pattern — not the provider's
   location**: the gateway is one more client of the per-lease address, and
   learns nothing about where the provider is that the tenant's own client
-  would not (spec §12.8, ADR 0008). The tenant makes that choice by
-  publishing the grant.
+  would not (spec §12.8, ADR 0008). The tenant makes that choice by handing
+  the workload to a gateway.
 
 ## A readable name
 
-A grant may also carry a `name`. It is served at `<name>.<GATEWAY_DOMAIN>`
+A handover may also carry a `name`. It is served at `<name>.<GATEWAY_DOMAIN>`
 **first come, first served**: only when it is a single DNS label and no grant
 still in force here already holds it. A name that fails either is logged and
 ignored and **costs the grant nothing else** — both workloads keep their
@@ -180,8 +214,10 @@ answer true, and a fourth stops it being asked at all (spec §12.7).
 **A Takeover.** For every workload it holds a grant for, this process watches
 kind `30433` with `#d` the workload id on the **primary's Relay Set** — the
 `relays` of `standby_set[0]`'s Provider Profile, which need not be a relay it
-is configured with. A claim that does not verify, or that is signed by a key
-the grant's `standby_set` does not name, is ignored. Where several members
+is configured with. That watch, and the members' Profiles, are the **only**
+things this gateway reads a relay for on a workload's account. A claim that
+does not verify, or that is signed by a key the handover's `standby_set` does
+not name, is ignored. Where several members
 claim the same workload, the **earliest** claim decides, as it does for the
 standbys themselves: a later claimant can only bring the deadline forward,
 never push it out.
@@ -212,16 +248,16 @@ the service — for as long as the resolution is in flight. A resolution that
 finished and learned nothing does withdraw the target, and says which of the
 two reasons it was.
 
-Two things stop a workload being served at all, with nothing for an operator
-to do: a grant that passes its `expires_at` (`grant_expired`, and the grant is
-not carried to a provider afterwards, which would refuse it `bad_grant`), and
-a **later grant from the same tenant naming another gateway**. That rotation
-names the *other* gateway in its `p` tag, so the one filter of *How a workload
-arrives here* cannot carry it; it is found on a second watch, kind `30438`
-with `#d` the workload ids held. Because that filter carries events from
-anyone, only the **tenant of the grant held** may replace it — otherwise a
-stranger could publish a later grant with the same `d` and take any workload
-off this gateway.
+**A grant that runs out** stops a workload being served, with nothing for an
+operator to do: at `now > expires_at` the hostname answers `grant_expired`,
+and the grant is not carried to a provider afterwards, which would refuse it
+`bad_grant` and rightly. Expiry is a comparison made when a request arrives,
+so a tenant that hands over a grant derived for a later moment is served again
+by that same act.
+
+A tenant that wants this gateway to stop serving a workload *before* its grant
+runs out sends a **Gateway Withdrawal** over the same sealed channel. That is
+a later ticket (TOON_Network#61) and is not implemented here yet.
 
 ```
 Takeover created_at  ──2 × liveness_cadence_s──▶  ask every member  ──▶  the URL moves
@@ -238,15 +274,16 @@ Environment only; there is no config file.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `GATEWAY_SECRET_KEY` | — | **Required.** This gateway's Nostr identity, 64 hex characters. The key a tenant names in a grant, and the key this process signs `status` with. An `nsec…` is not accepted; decode it first. |
 | `GATEWAY_DOMAIN` | — | **Required.** Every workload is served at `<canonical label>.<domain>`. Point a wildcard `*.<domain>` at this process. |
-| `GATEWAY_RELAYS` | — | **Required.** Comma-separated `ws://`/`wss://` relays to watch for grants. |
+| `GATEWAY_RELAYS` | — | **Required.** Comma-separated `ws://`/`wss://` relays, where this process looks for the Provider Profiles of the members a handover names and for the Takeovers that move a workload between them. |
+| `GATEWAY_HANDOVER_PORT` | — | **Required.** Where this gateway's connector forwards a sealed Gateway Handover, and the only way a tenant can tell this process to serve a workload. Its **own** listener, never a path on the ones that front workloads, because a reserved path would carve a hole out of every tenant's URL space. It should not be reachable from outside the connector. |
 | `GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY` | — | Paths to the certificate and key for `*.<GATEWAY_DOMAIN>`. Required unless `GATEWAY_HTTP_PORT` is set. |
 | `GATEWAY_HTTPS_PORT` | `443` | Where TLS is terminated. |
 | `GATEWAY_HTTP_PORT` | — | A plain-HTTP listener, for development or for a deployment terminating TLS in front. Set it or the certificate pair, or this process refuses to start. |
 | `GATEWAY_BIND_ADDR` | `0.0.0.0` | What to listen on. |
 | `GATEWAY_RESOLVE_TIMEOUT_MS` | `3000` | How long resolution waits for anything it needs — a member's Profile off a relay, and that member's answer to `status`. Every member is asked at once, so this is what one slow member costs a tenant's first request — plus, for a hidden member, the circuit build, which is bounded separately (see [A workload on a Hidden Provider](#a-workload-on-a-hidden-provider)). |
 | `GATEWAY_FOLLOW_TICK_MS` | `1000` | How often this process looks at the clock while following a workload. It decides **nothing**: a settle window and a Liveness cadence are counted in the grant's and the Profile's own seconds, and this is only how late it may be in noticing that one has passed. Tests set it to tens of milliseconds so a clock they control is noticed at once. |
+| `GATEWAY_ADMIT_PER_MINUTE` | `6` | How many admission rounds any one provider may be asked for in a minute. Anyone can seal a handover naming any provider, so this is what stops a burst of unsolicited handovers making a reflector of this process; a handover naming a member that is over its rate is refused whole, and nothing is asked. |
 | `TOON_SOCKS_PROXY` | — | `socks5h://<host>:<port>`: the SOCKS5 port of a running `anon` daemon, through which every `.anyone` host is dialled. Without it, a workload on a Hidden Provider is refused with `no_proxy`. The scheme must be `socks5h`: under plain `socks5` this process would resolve the destination itself, putting a hidden service into a plaintext DNS query. |
 | `GATEWAY_DIAL_REWRITE` | `{}` | **Development only.** A JSON map from an advertised `host` or `host:port` to the `host` or `host:port` this process dials instead — a member's `connector_url` and the `access.host` it answers name the member as *its* clients reach it, and on a compose network that is not where this container reaches it. Applied at the one dial seam, so `status` and forwarding agree; rewrites no URL and no header. The sandbox's value is in `infra/sandbox/conf/workload-gateway.conf`. Empty in production, where the advertised address is the real one. |
 
@@ -255,9 +292,9 @@ them at once:
 
 ```
 [gateway] this Workload Gateway cannot start:
-  - GATEWAY_SECRET_KEY is required: it is this gateway's Nostr identity …
   - GATEWAY_DOMAIN is required: every workload is served at <canonical label>.<domain>.
-  - this gateway has nothing to listen on: set GATEWAY_TLS_CERT and GATEWAY_TLS_KEY …
+  - GATEWAY_HANDOVER_PORT is required: it is where this gateway's connector forwards …
+  - this gateway has nothing to front a workload on: set GATEWAY_TLS_CERT and GATEWAY_TLS_KEY …
 ```
 
 A half-configured gateway is worse than one that will not start: it answers a
@@ -270,25 +307,26 @@ and a broken gateway look like from outside.
 npm install
 
 # development: a plain listener, no certificate
-GATEWAY_SECRET_KEY=<64 hex> \
 GATEWAY_DOMAIN=gw.localhost \
 GATEWAY_RELAYS=ws://localhost:7100 \
+GATEWAY_HANDOVER_PORT=8081 \
 GATEWAY_HTTP_PORT=8080 \
 npm start
 
 # production: TLS for *.gw.example
-GATEWAY_SECRET_KEY=<64 hex> \
 GATEWAY_DOMAIN=gw.example \
 GATEWAY_RELAYS=wss://relay.one,wss://relay.two \
+GATEWAY_HANDOVER_PORT=8081 \
+GATEWAY_BIND_ADDR=0.0.0.0 \
 GATEWAY_TLS_CERT=/etc/tls/fullchain.pem \
 GATEWAY_TLS_KEY=/etc/tls/privkey.pem \
 npm start
 
 # fronting Hidden Providers too: .anyone hosts go through a running anon daemon
 TOON_SOCKS_PROXY=socks5h://127.0.0.1:9050 \
-GATEWAY_SECRET_KEY=<64 hex> \
 GATEWAY_DOMAIN=gw.example \
 GATEWAY_RELAYS=wss://relay.one \
+GATEWAY_HANDOVER_PORT=8081 \
 GATEWAY_TLS_CERT=/etc/tls/fullchain.pem \
 GATEWAY_TLS_KEY=/etc/tls/privkey.pem \
 npm start
@@ -306,7 +344,7 @@ same environment, with the certificate pair mounted wherever
 `GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY` point. The TOON sandbox
 (`infra/sandbox`, profile `gateway`) runs it this way behind its own
 connector, with a self-signed wildcard certificate and the plain listener
-beside it, and its README walks from `make up-gateway` through publishing a
+beside it, and its README walks from `make up-gateway` through handing over a
 grant to a `curl` of a workload's canonical URL.
 
 ## Its own connector
@@ -323,11 +361,18 @@ where TLS is terminated ahead of this process.
 ### How `status` is sent — read this before deploying
 
 `status` is a **free** route (spec §5): no payment to make, no claim to attach,
-no channel to open. What this process sends is the §6.1.1 packet body —
-`{ "request": <event> }` — as a plain `POST` to the `status` path beside the
-member's `connector_url`. That is the body a provider reads once its connector
-has unsealed the envelope, and the path the wire fixtures record as
+no channel to open. What this process sends is the §6.1.2 packet body —
+`{ "request": <request> }`, a plain JSON object nobody signed, carrying the
+member's grant as its `continuation` and the moment it was derived for as its
+content's `gateway_expires_at` — as a plain `POST` to the `status` path beside
+the member's `connector_url`. That is the body a provider reads once its
+connector has unsealed the envelope, and the path the wire fixtures record as
 `http_path`.
+
+The **sealed handover a tenant sends this gateway** arrives the same way from
+the other side: the gateway's own connector unseals the envelope and forwards
+plain HTTP to `GATEWAY_HANDOVER_PORT`, so this process reads plaintext JSON
+and holds no sealing key of its own.
 
 **The limit of that, said plainly.** A connector that terminates
 `<addr>.status` expects a *sealed ILP packet* at its client edge, and answers
@@ -343,9 +388,8 @@ the route is free — while pulling a payment client, a channel and a sealing
 key into a process whose whole point is that it holds none of them. Adding it
 changes exactly one file, [`src/status.mjs`](src/status.mjs), and would read
 `connector_seal_key` and `ilp_address` off the Profile that
-[`src/profiles.mjs`](src/profiles.mjs) already has: the request, the signature
-and the grant are identical either way. What changes is the carriage, not the
-request.
+[`src/profiles.mjs`](src/profiles.mjs) already has: the request and the grant
+are identical either way. What changes is the carriage, not the request.
 
 ## The error page
 
@@ -359,7 +403,7 @@ page when a browser asks for one, and the reason is repeated in a
 | Reason | Means |
 |---|---|
 | `no_grant` | This hostname names no workload this gateway has been granted. |
-| `grant_expired` | The grant ran out. Publishing it again renews it, with no restart. |
+| `grant_expired` | The grant ran out. Handing over one derived for a later moment renews it, with no restart. |
 | `not_resolved` | A grant is held, but where the workload runs is not known yet. |
 | `no_running_member` | Every member of the Standby Set answered, and none of them is running it. |
 | `member_unreachable` | A member that would answer for the workload cannot be reached — its connector, or the address it gave. |
@@ -367,7 +411,19 @@ page when a browser asks for one, and the reason is repeated in a
 
 A request to a hostname with no grant — an unknown label, the bare domain, a
 deeper name, or a name under somebody else's domain — **never reaches a
-provider or a workload**: nothing is dialled at all.
+provider or a workload and reads no relay on its account**: nothing is dialled
+at all. A gateway is not a probe, and an unknown hostname must not become one.
+
+Admission answers its own refusals, at the handover port and in the same
+`{ "error", "message" }` shape: `invalid_handover` (it is not a handover),
+`grant_expired` (its moment has passed, so nothing was asked), `rate_limited`
+(a provider it names is over its admission rate, so nothing was asked),
+`not_admitted` (the round was made and no member took the grant; the handover
+was dropped), `no_proxy` (a member it names is at an `.anyone` address this
+gateway has no anon client for, so nothing was dialled) and `admission_failed`
+(this gateway could not make a round at all). The last three are deliberately
+not one code: only `not_admitted` is a reason to go and derive another grant.
+A handover it admitted is answered `{ "workload_id", "hostname", "expires_at" }`.
 
 `no_running_member` and `member_unreachable` are deliberately not one reason:
 the first says nothing is running the workload, the second says this gateway
@@ -387,20 +443,21 @@ HTML page and the header all follow.
 |---|---|
 | `src/main.mjs` | The process: read the environment, refuse or start, handle signals. |
 | `src/config.mjs` | The configuration, and the refusal naming everything missing. |
-| `src/gateway.mjs` | The composition: listeners, the grant subscription, `stop()`. |
+| `src/gateway.mjs` | The composition: listeners, the admission door, `stop()`. |
 | `src/serve.mjs` | The request path: hostname → grant → the resolver seam, and the refusals. |
+| `src/admit.mjs` | Admission: the handover listener, the rate limit, the one bounded round. |
 | `src/grants.mjs` | The grants held: one per workload, replacement, the hostname index. |
-| `src/grant.mjs` | Reading one Gateway Grant event, or saying which field is wrong. |
-| `src/relays.mjs` | The relay pool: subscriptions that stay open, and the grant filter. |
+| `src/handover.mjs` | Reading one Gateway Handover, or saying which field is wrong. |
+| `src/relays.mjs` | The relay pool: subscriptions that stay open. |
 | `src/profiles.mjs` | The Standby Set members' Profiles: connectors, Relay Sets, cadences. |
 | `src/resolve.mjs` | Resolution: ask every member, pick the running one, hold the target. |
-| `src/follow.mjs` | Following the workload: the Takeover watch, the settle window, the per-cadence re-ask, the rotation watch. |
-| `src/status.mjs` | One `status` request: signing it, where it is sent, reading the answer. |
+| `src/follow.mjs` | Following the workload: the Takeover watch, the settle window, the per-cadence re-ask. |
+| `src/status.mjs` | One `status` request: building it, where it is sent, reading the answer. |
 | `src/forward.mjs` | Forwarding: the headers, the answer, and WebSocket upgrades. |
 | `src/dial.mjs` | The one place a TCP connection is opened: `.anyone` through the proxy, anything else directly, and the `no_proxy` refusal. |
 | `src/rewrite.mjs` | `GATEWAY_DIAL_REWRITE`: an advertised address dialled somewhere else, in front of that seam. |
 | `src/hostname.mjs` | The canonical label: base32, and reading a label out of a `Host`. |
-| `src/nostr.mjs` | NIP-01: serialize, id, verify, sign. |
+| `src/nostr.mjs` | NIP-01, the reading half: serialize, id, verify. This gateway signs nothing. |
 | `src/reasons.mjs` | The `503` vocabulary. |
 | `src/kinds.mjs` | The kind numbers, pinned to the provider's fixtures by a test. |
 
@@ -426,23 +483,35 @@ example of each piece; read it first.
 
 ```js
 const gateway = await startTestGateway({
-  events: [gatewayGrant({ workloadId, gateway: GATEWAY.public_key })],
-  resolve: myResolver,           // the seam M5-4 fills in
+  events: [providerProfile({ connectorUrl })],   // what the relay already holds
+  handovers: [gatewayHandover({ workloadId })],  // POSTed at the handover port
+  probe: admitAll,                               // the admission seam
+  resolve: myResolver,                           // the resolver seam
 });
 t.after(() => gateway.close());
 
 const answered = await gateway.get(gateway.hostFor(workloadId), { path: '/orders' });
+await gateway.handover(gatewayHandover({ workloadId, name: 'shop' }));  // mid-test
 gateway.publish(takeover({ workloadId }));   // mid-test, into the relay it watches
 ```
 
+A test about something **downstream of admission** passes `probe: admitAll`
+and gets a handover admitted with no member asked, exactly as one about
+something downstream of resolution passes its own `resolve`.
+[`tests/admission.test.mjs`](tests/admission.test.mjs) is where the real round
+is driven, against a stub member that checks a presented grant the way spec
+§6.5.1 has a provider check one.
+
 | Helper | Gives you |
 |---|---|
-| `tests/helpers/harness.mjs` | `startTestGateway`, `gateway.get(host)`, `gateway.publish(event)`, `hostFor`, `untilServed`, `untilReason`, `until`. |
-| `tests/helpers/stub-relay.mjs` | A NIP-01 relay: holds Profiles, grants and Takeover events; `publish` reaches subscriptions already open; replaces addressable events as a relay does. |
-| `tests/helpers/stub-connector.mjs` | A provider's connector answering `POST /status` (spec §6.5). `answerWith` to change the answer, `goSilent` for a member that never replies, `requests` for what it was asked and who signed it. |
+| `tests/helpers/harness.mjs` | `startTestGateway`, `gateway.get(host)`, `gateway.handover(body)`, `gateway.publish(event)`, `admitAll`, `hostFor`, `untilServed`, `untilReason`, `until`. |
+| `tests/helpers/handover.mjs` | `gatewayHandover` and the tenant's two HKDFs (`continuationFor`, `gatewaySub`, `grantFrom`), plus `asProvider` — a member that checks a presented grant the way a provider does. |
+| `tests/helpers/stub-relay.mjs` | A NIP-01 relay: holds Profiles and Takeover events; `publish` reaches subscriptions already open; replaces replaceable events as a relay does. |
+| `tests/helpers/stub-connector.mjs` | A provider's connector answering `POST /status` (spec §6.5). `answerWith` to change the answer, `goSilent` for a member that never replies, `requests` for what it was asked and what grant it presented. |
 | `tests/helpers/stub-workload.mjs` | The tenant's application: records method, URL, headers, body and who connected, and echoes over WebSocket. |
 | `tests/helpers/stub-socks.mjs` | A SOCKS5 proxy standing in for the `anon` daemon: routes a name to a stub, records every destination it was asked for and where each onward connection left from — so a test can say every `.anyone` connection went through it and nothing came any other way. |
-| `tests/helpers/events.mjs` | Signed `gatewayGrant`, `providerProfile`, `takeover`, `liveness`, and `CONSTANTS` — the test-only keys and clock every wire fixture was generated in. |
+| `tests/helpers/events.mjs` | Signed `providerProfile`, `takeover`, `liveness`, and `CONSTANTS` — the test-only keys and clock every wire fixture was generated in. |
+| `tests/helpers/sign.mjs` | `signEvent` and `publicKeyOf`: the signing half of NIP-01, which only the tests need. |
 
 The wire fixtures in `tests/fixtures/wire/` are copied from the provider
 (`toon-provider`, `tests/wire_fixtures.rs`) and are the ground truth: if this
@@ -468,12 +537,13 @@ upgrades arrive at the same resolver with `socket` and `head` in place of
 `res`.
 
 Left out, `startGateway` builds the real one (`src/resolve.mjs`). It is
-returned as `gateway.resolver`, and that is the seam the rest of Milestone 5
-works at:
+returned as `gateway.resolver`, and that is the seam following and admission
+work at:
 
 | | |
 |---|---|
 | `resolver.resolveNow(grant)` | Ask the Standby Set again, now. Concurrent callers join one attempt. |
+| `resolver.probe(handover)` | One bounded round for admission: it records nothing, and joins no attempt already running, so a handover this gateway has not accepted can neither ride on a round started for the grant it holds nor drop a served workload's target by failing. |
 | `resolver.current(workloadId)` | Where the workload is running, as far as this gateway knows — the *last known target*, which keeps serving while a re-resolution is in flight. |
 | `resolver.forget(workloadId)` | Stop serving that target. |
 | `gateway.profiles.get(pubkey)` | A member's `connectorUrl`, its `relays` and its `livenessCadenceS`. |

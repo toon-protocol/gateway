@@ -20,12 +20,12 @@
 export const REASONS = {
   no_grant: ({ host }) =>
     `no grant for this hostname: ${host} names no workload this gateway has been granted. ` +
-    'A Gateway Grant naming this gateway (spec §3.1.3) is how a workload arrives here.',
+    'A Gateway Handover sealed to this gateway (spec \u00a712.1) is how a workload arrives here.',
 
   grant_expired: ({ workloadId, expiresAt }) =>
     `the grant expired: the Gateway Grant for workload ${workloadId} ran out at ` +
-    `${new Date(expiresAt * 1000).toISOString()}. Publishing the grant again under the same ` +
-    'workload id renews it (spec §3.1.3); this gateway then serves it again with no restart.',
+    `${new Date(expiresAt * 1000).toISOString()}. Handing over a grant derived for a later ` +
+    'moment renews it (spec \u00a76.5.1); this gateway then serves it again with no restart.',
 
   not_resolved: ({ workloadId }) =>
     `not resolved yet: this gateway holds a grant for workload ${workloadId} but has not yet ` +

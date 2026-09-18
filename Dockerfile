@@ -12,6 +12,8 @@ COPY src/ src/
 # Configuration is environment only (README "Configuration"); the certificate
 # pair, when there is one, is mounted wherever GATEWAY_TLS_CERT/KEY point.
 ENV NODE_ENV=production
-EXPOSE 8080 8443
+# 8080/8443 front workloads; 8081 is where the connector forwards a sealed
+# Gateway Handover (GATEWAY_HANDOVER_PORT, README "Configuration").
+EXPOSE 8080 8081 8443
 
 CMD ["node", "src/main.mjs"]

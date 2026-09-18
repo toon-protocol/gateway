@@ -1,9 +1,14 @@
-// NIP-01 events, as much of them as a gateway needs.
+// NIP-01 events, as much of them as a gateway needs — which is the READING
+// half and no more.
 //
-// A gateway reads grants off relays and signs `status` requests with its own
-// key (spec §6.5), and a relay is not trusted: every event this gateway acts
-// on has its `id` re-derived and its `sig` checked here first. Nothing TOON-
-// specific is hashed or signed (spec §6.1.1), so this is plain NIP-01.
+// A gateway signs nothing and publishes nothing (spec §12.1), and holds no
+// Nostr key at all. What it reads off a relay is a member's Provider Profile
+// and a standby's Takeover, and a relay is not trusted: every event this
+// gateway acts on has its `id` re-derived and its `sig` checked here first.
+// Nothing TOON-specific is hashed or signed, so this is plain NIP-01.
+//
+// The signing half lives in `tests/helpers/sign.mjs`, because forging the
+// events a gateway reads is something only the tests do.
 
 import { schnorr } from '@noble/curves/secp256k1.js';
 import { sha256 } from '@noble/hashes/sha2.js';
@@ -54,28 +59,6 @@ export function verifyEvent(event) {
   } catch {
     return false;
   }
-}
-
-/** The x-only public key of a 32-byte hex secret key. */
-export function publicKeyOf(secretKey) {
-  if (!isHex(secretKey, 32)) {
-    throw new Error('a Nostr secret key must be 64 hex characters (32 bytes)');
-  }
-  return bytesToHex(schnorr.getPublicKey(hexToBytes(secretKey.toLowerCase())));
-}
-
-/**
- * A signed event: `{ kind, created_at, tags, content }` plus this key's
- * pubkey, the derived id and the signature over it.
- */
-export function signEvent(secretKey, { kind, created_at, tags = [], content = '' }) {
-  const unsigned = { pubkey: publicKeyOf(secretKey), created_at, kind, tags, content };
-  const id = eventId(unsigned);
-  return {
-    ...unsigned,
-    id,
-    sig: bytesToHex(schnorr.sign(hexToBytes(id), hexToBytes(secretKey.toLowerCase()))),
-  };
 }
 
 /** The value of the first `name` tag, or `undefined`. */

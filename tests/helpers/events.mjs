@@ -1,13 +1,18 @@
 // Signed events a test can publish into the stub relay.
 //
-// Content is serialised in DECLARATION ORDER, not sorted: a grant's `id` is
+// Everything here is something a gateway READS off a relay: a member's
+// Provider Profile, its Liveness, and a standby's Takeover. There is no grant
+// among them any more — a grant arrives in a sealed packet (spec §12.1), which
+// is `tests/helpers/handover.mjs`.
+//
+// Content is serialised in DECLARATION ORDER, not sorted: an event's `id` is
 // the hash of exactly these bytes, and re-serialising with sorted keys makes
 // an event the provider's fixtures no longer recognise.
 
 import { readFileSync } from 'node:fs';
 
-import { signEvent } from '../../src/nostr.mjs';
-import { K_GATEWAY_GRANT, K_LIVENESS, K_PROFILE, K_TAKEOVER, LABEL } from '../../src/kinds.mjs';
+import { K_LIVENESS, K_PROFILE, K_TAKEOVER, LABEL } from '../../src/kinds.mjs';
+import { signEvent } from './sign.mjs';
 
 /** The test-only keys, clock and kind numbers every wire fixture was made in. */
 export const CONSTANTS = JSON.parse(
@@ -16,38 +21,6 @@ export const CONSTANTS = JSON.parse(
 
 export const wireFixture = (name) =>
   JSON.parse(readFileSync(new URL(`../fixtures/wire/${name}.json`, import.meta.url), 'utf8'));
-
-/**
- * A Gateway Grant (spec §3.1.3), signed by a tenant.
- *
- * `d` is the workload id, so publishing again under the same id REPLACES the
- * grant — which is how a test drives renewal, rotation and expiry.
- */
-/**
- * @param {{
- *   tenantSecret?: string, workloadId: string, gateway: string,
- *   standbySet?: any, expiresAt?: any, name?: any, createdAt?: number, httpPort?: any,
- * }} options
- */
-export function gatewayGrant({
-  tenantSecret = CONSTANTS.tenant.secret_key,
-  workloadId,
-  gateway,
-  httpPort = 8080,
-  standbySet = [CONSTANTS.provider.public_key],
-  expiresAt = CONSTANTS.now + 86_400,
-  name,
-  createdAt = CONSTANTS.now,
-}) {
-  const content = { workload_id: workloadId, gateway, http_port: httpPort, standby_set: standbySet, expires_at: expiresAt };
-  if (name !== undefined) content.name = name;
-  return signEvent(tenantSecret, {
-    kind: K_GATEWAY_GRANT,
-    created_at: createdAt,
-    tags: [['d', workloadId], ['p', gateway], ['L', LABEL]],
-    content: JSON.stringify(content),
-  });
-}
 
 /** A Provider Profile (spec §4.1), signed by a provider. */
 /**

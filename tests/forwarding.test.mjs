@@ -8,17 +8,16 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import WebSocket from 'ws';
 
-import { verifyEvent } from '../src/nostr.mjs';
-import { CONSTANTS, gatewayGrant, providerProfile } from './helpers/events.mjs';
-import { startTestGateway, until } from './helpers/harness.mjs';
+import { CONSTANTS, providerProfile } from './helpers/events.mjs';
+import { gatewayHandover, grantFrom } from './helpers/handover.mjs';
+import { admitAll, startTestGateway, until } from './helpers/harness.mjs';
 import { running, startStubConnector } from './helpers/stub-connector.mjs';
 import { startStubWorkload } from './helpers/stub-workload.mjs';
 
-const GATEWAY = CONSTANTS.gateway.public_key;
 const WORKLOAD = 'aa'.repeat(32);
 const HTTP_PORT = 8080;
 
-/** The Standby Set of the tests below: primary first, exactly as a grant lists it. */
+/** The Standby Set of the tests below: primary first, as a handover lists it. */
 const MEMBERS = [CONSTANTS.primary_provider, CONSTANTS.standby_provider, CONSTANTS.provider];
 
 /**
@@ -40,12 +39,14 @@ async function standbySet(t, answers) {
   return { connectors, profiles };
 }
 
-const grantFor = (overrides = {}) =>
-  gatewayGrant({
+const EXPIRES_AT = CONSTANTS.now + 86_400;
+
+const handoverFor = (overrides = {}) =>
+  gatewayHandover({
     workloadId: WORKLOAD,
-    gateway: GATEWAY,
     httpPort: HTTP_PORT,
     standbySet: MEMBERS.map((m) => m.public_key),
+    expiresAt: EXPIRES_AT,
     ...overrides,
   });
 
@@ -72,8 +73,11 @@ describe('forwarding to the running member', () => {
       notRunning('stopped'),
     ]);
 
-    const grant = grantFor();
-    const gateway = await startTestGateway({ events: [grant, ...profiles] });
+    const gateway = await startTestGateway({
+      events: profiles,
+      handovers: [handoverFor()],
+      probe: admitAll,
+    });
     t.after(() => gateway.close());
 
     const host = gateway.hostFor(WORKLOAD);
@@ -89,27 +93,33 @@ describe('forwarding to the running member', () => {
     assert.equal(reached.headers['x-forwarded-proto'], 'http', 'the plain development listener');
     assert.equal(reached.headers['x-forwarded-for'], '127.0.0.1');
 
-    // Every member was asked, by this gateway's own key, carrying the grant.
+    // Every member was asked, each presenting the grant derived for ITS OWN
+    // key: one value per member, because §6.5.1 derives under the member's key.
     for (const [index, connector] of connectors.entries()) {
       const [asked] = connector.requests;
       assert.ok(asked !== undefined, `member ${index} was not asked`);
       assert.equal(asked.path, '/status');
-      assert.equal(asked.signer, GATEWAY, 'the GATEWAY signs, not the tenant');
-      assert.ok(verifyEvent(asked.request), 'and the signature is really the gateway\'s');
-      assert.equal(asked.grant?.id, grant.id, 'and carries the grant it holds');
+      assert.equal(asked.request.sig, undefined, 'nobody signs a Lease Request');
+      assert.equal(
+        asked.continuation,
+        grantFrom(CONSTANTS.tenant.root_secret, MEMBERS[index].public_key, EXPIRES_AT),
+        'the grant this member\'s own token derives',
+      );
+      assert.equal(asked.gatewayExpiresAt, EXPIRES_AT);
       assert.equal(asked.content.workload_id, WORKLOAD);
-
-      const tag = (name) => asked.request.tags.find((entry) => entry[0] === name)?.[1];
-      assert.equal(tag('p'), MEMBERS[index].public_key, 'addressed to that member');
-      assert.equal(asked.request.tags.filter((entry) => entry[0] === 'p').length, 1, 'and only it');
-      assert.equal(tag('op'), 'status');
+      assert.equal(asked.request.provider, MEMBERS[index].public_key, 'addressed to that member');
+      assert.equal(asked.request.op, 'status');
       // The §6.1 window: a provider refuses a request without one.
-      const expiration = Number(tag('expiration'));
       assert.ok(
-        expiration > asked.request.created_at && expiration - asked.request.created_at <= 300,
-        `a window a provider will accept, got ${tag('expiration')}`,
+        asked.request.expiration > CONSTANTS.now && asked.request.expiration - CONSTANTS.now <= 300,
+        `a window a provider will accept, got ${asked.request.expiration}`,
       );
     }
+
+    // No two members were handed the same value: one member cannot replay
+    // another's grant, which is what the per-provider derivation is for.
+    const presented = connectors.map((connector) => connector.requests[0].continuation);
+    assert.equal(new Set(presented).size, MEMBERS.length);
 
     // And `status` was the ONLY thing asked of anybody. It is a free route
     // (spec §5): this gateway holds no lease and calls nothing that is priced.
@@ -142,7 +152,11 @@ describe('forwarding to the running member', () => {
       notRunning('reserved'),
     ]);
 
-    const gateway = await startTestGateway({ events: [grantFor(), ...profiles] });
+    const gateway = await startTestGateway({
+      events: profiles,
+      handovers: [handoverFor()],
+      probe: admitAll,
+    });
     t.after(() => gateway.close());
 
     assert.equal((await gateway.get(gateway.hostFor(WORKLOAD))).body, 'the primary');
@@ -164,7 +178,9 @@ describe('forwarding to the running member', () => {
     ]);
 
     const gateway = await startTestGateway({
-      events: [grantFor(), ...profiles],
+      events: profiles,
+      handovers: [handoverFor()],
+      probe: admitAll,
       tls: true,
       http: false,
     });
@@ -175,7 +191,7 @@ describe('forwarding to the running member', () => {
     assert.equal(workload.requests[0].headers['x-forwarded-proto'], 'https');
   });
 
-  it('forwards to the host port of the grant\'s `http_port`, not the first port and not SSH', async (t) => {
+  it('forwards to the host port of the handover\'s `http_port`, not the first port and not SSH', async (t) => {
     // Three servers, so picking the wrong one is a WRONG BODY rather than a
     // coincidence: the first port listed is a database, the SSH port is a real
     // listener too, and only the third is the application.
@@ -199,7 +215,11 @@ describe('forwarding to the running member', () => {
       notRunning('reserved'),
     ]);
 
-    const gateway = await startTestGateway({ events: [grantFor(), ...profiles] });
+    const gateway = await startTestGateway({
+      events: profiles,
+      handovers: [handoverFor()],
+      probe: admitAll,
+    });
     t.after(() => gateway.close());
 
     const answered = await gateway.get(gateway.hostFor(WORKLOAD));
@@ -223,7 +243,11 @@ describe('forwarding to the running member', () => {
       notRunning('reserved'),
     ]);
 
-    const gateway = await startTestGateway({ events: [grantFor(), ...profiles] });
+    const gateway = await startTestGateway({
+      events: profiles,
+      handovers: [handoverFor()],
+      probe: admitAll,
+    });
     t.after(() => gateway.close());
 
     const host = gateway.hostFor(WORKLOAD);

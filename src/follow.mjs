@@ -5,7 +5,7 @@
 // is what keeps the answer true: WHEN the Standby Set is asked again, and when
 // a workload stops being served at all. Nothing here forwards anything, and
 // nothing here decides where a request goes — it hands the resolver reasons to
-// re-ask and, twice, a reason to forget.
+// re-ask and, once, a reason to forget.
 //
 // THREE REASONS TO RE-ASK, and they are not interchangeable:
 //
@@ -35,12 +35,16 @@
 // WHAT IT DOES NOT DO. It never drops a target itself on the strength of a
 // Takeover or a cadence — only a FINISHED resolution changes or withdraws one
 // (`src/resolve.mjs`), so nothing here takes a healthy workload offline while
-// a slow relay or a slow member is still being waited for. The two things it
-// does forget are a grant that ran out and a workload rotated to another
-// gateway, because in both cases this gateway has lost the authority to ask.
+// a slow relay or a slow member is still being waited for. The one thing it
+// does forget is a grant that ran out, because this gateway has then lost the
+// authority to ask about that lease at all.
+//
+// A TAKEOVER IS THE ONLY EVENT IT WATCHES FOR. A gateway no longer reads a
+// relay on a workload's account for anything else (spec §12.1): there is no
+// grant to find, and a tenant that wants this gateway to stop serving a
+// workload sends it a Gateway Withdrawal rather than publishing anything.
 
-import { canonicalLabel } from './hostname.mjs';
-import { K_GATEWAY_GRANT, K_TAKEOVER } from './kinds.mjs';
+import { K_TAKEOVER } from './kinds.mjs';
 import { tagValue, verifyEvent } from './nostr.mjs';
 
 /**
@@ -92,8 +96,8 @@ export function createFollower({
    * that opened its settle window and when that window ends.
    *
    * One map rather than four, because every one of these begins and ends
-   * together: a workload rotated away or a grant that ran out stops being
-   * followed in every one of these senses at the same moment.
+   * together: a grant that ran out stops being followed in every one of these
+   * senses at the same moment.
    *
    * @typedef {{
    *   grant: any,
@@ -106,9 +110,6 @@ export function createFollower({
    */
   /** @type {Map<string, Followed>} workload id -> what is known about following it */
   const following = new Map();
-  /** The one subscription that can deliver a grant rotating a workload away. */
-  /** @type {{ ids: string[], subscription: { close: () => void } } | null} */
-  let rotation = null;
   /** @type {NodeJS.Timeout | null} */
   let timer = null;
   let queued = false;
@@ -124,8 +125,8 @@ export function createFollower({
    *
    * That is where §7.1 has a standby publish its claim, and it need not be a
    * relay this gateway is configured with. A primary whose Profile names no
-   * Relay Set leaves nowhere else to look but the relays this gateway already
-   * watches, which is where its tenant's grant came from.
+   * Relay Set leaves nowhere else to look but the relays this gateway is
+   * configured with.
    */
   const relaySetOf = (grant) => {
     const theirs = primaryOf(grant)?.relays ?? [];
@@ -145,10 +146,10 @@ export function createFollower({
    * A Takeover event off the primary's Relay Set.
    *
    * A relay is trusted for nothing: the event's id and signature are checked
-   * here, and a claim signed by a key the GRANT does not name is not a claim
-   * on this workload (§7.1 counts claims from `standby_set` and nobody else).
-   * Without that check, anyone could publish a kind 30433 with this `d` and
-   * hold up every re-ask for two cadences.
+   * here, and a claim signed by a key the HANDOVER does not name is not a
+   * claim on this workload (§7.1 counts claims from `standby_set` and nobody
+   * else). Without that check, anyone could publish a kind 30433 with this `d`
+   * and hold up every re-ask for two cadences.
    */
   const onTakeover = (workloadId) => (event) => {
     const followed = following.get(workloadId);
@@ -171,7 +172,7 @@ export function createFollower({
     if (!followed.grant.standbySet.includes(event.pubkey)) {
       log(
         `ignored a Takeover claim for workload ${workloadId}: it is signed by ${event.pubkey}, ` +
-          'which the grant\'s `standby_set` does not name',
+          'which the handover\'s `standby_set` does not name',
       );
       return;
     }
@@ -194,30 +195,7 @@ export function createFollower({
     );
   };
 
-  /**
-   * The one subscription that can deliver a grant rotating a workload AWAY.
-   *
-   * Such a grant names the other gateway in its `p` tag, so §12.1's `#p`
-   * filter never carries it: it is found on the workload ids this gateway
-   * holds, on the relays it is configured with — which is where this tenant
-   * published the grant that brought the workload here.
-   */
-  const syncRotation = (ids) => {
-    if (rotation !== null && sameList(rotation.ids, ids)) return;
-    rotation?.subscription.close();
-    rotation = null;
-    if (ids.length === 0) return;
-    rotation = {
-      ids,
-      subscription: pool.subscribe({
-        relays,
-        filters: [{ kinds: [K_GATEWAY_GRANT], '#d': ids }],
-        onEvent: (event) => offer(event),
-      }),
-    };
-  };
-
-  /** Follow what is held now: the grants, their Takeover watches, the rotations. */
+  /** Follow what is held now: the grants and their Takeover watches. */
   const sync = () => {
     if (closed) return;
     const at = now();
@@ -229,21 +207,18 @@ export function createFollower({
         .map((grant) => [grant.workloadId, grant]),
     );
 
-    // A workload rotated away, or a grant that ran out: this gateway may no
-    // longer read that lease, so it stops watching, stops asking, and forgets
-    // where the workload was. An expired grant is not carried to a provider,
-    // which would refuse it `bad_grant` (spec §6.5) and rightly.
+    // A grant that ran out: this gateway may no longer read that lease, so it
+    // stops watching, stops asking, and forgets where the workload was. An
+    // expired grant is not carried to a provider, which would refuse it
+    // `bad_grant` (spec §6.5.1) and rightly.
     for (const [workloadId, followed] of following) {
       if (held.has(workloadId)) continue;
       followed.subscription.close();
       following.delete(workloadId);
       if (resolver.forget(workloadId)) {
         log(
-          `workload ${workloadId} is no longer served: ${
-            grants.find(canonicalLabel(workloadId)) === undefined
-              ? 'its grant names another gateway'
-              : 'its grant expired'
-          }. Forgetting where it was running`,
+          `workload ${workloadId} is no longer served: its grant expired. Forgetting where it ` +
+            'was running',
         );
       }
     }
@@ -275,7 +250,13 @@ export function createFollower({
       log(`workload ${grant.workloadId}: watching ${want.join(', ')} for a Takeover`);
     }
 
-    syncRotation([...following.keys()].sort());
+    // And no Profile is watched but for a member of something followed. An
+    // admission round watches the members it is about before it asks them
+    // (`src/resolve.mjs`), and a handover anyone can seal names whoever it
+    // likes: without this, one refused handover would leave its fabricated
+    // pubkeys in the live filter for good, which is not the "dropped, and not
+    // remembered" spec §12.1 requires of one.
+    profiles.keepOnly([...held.values()].flatMap((grant) => grant.standbySet));
   };
 
   /** Re-sync after the events of one turn, rather than once per event. */
@@ -286,19 +267,6 @@ export function createFollower({
       queued = false;
       sync();
     });
-  };
-
-  /**
-   * Offer an event to the grants held, and follow whatever it changed.
-   *
-   * Every grant this gateway sees arrives through here — the `#p` filter of
-   * §12.1 and the rotation watch above — so that a grant taking a workload
-   * away takes its Takeover watch and its target with it.
-   */
-  const offer = (event) => {
-    const outcome = grants.offer(event);
-    scheduleSync();
-    return outcome;
   };
 
   const tick = () => {
@@ -328,8 +296,15 @@ export function createFollower({
   };
 
   return {
-    /** Offer a grant event, and follow what it changed. */
-    offer,
+    /**
+     * Follow what is held now.
+     *
+     * Admission calls it after EVERY round it finishes, not only an accepted
+     * one: an accepted handover starts being followed at once rather than on
+     * the next tick, and a refused one has its members let go of at once
+     * rather than lingering in the Profile filter.
+     */
+    refresh: scheduleSync,
 
     /** Start following: watch what is held, and keep looking at the clock. */
     start() {
@@ -345,8 +320,6 @@ export function createFollower({
       timer = null;
       for (const followed of following.values()) followed.subscription.close();
       following.clear();
-      rotation?.subscription.close();
-      rotation = null;
     },
   };
 }

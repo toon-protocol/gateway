@@ -13,8 +13,8 @@ import { readFileSync } from 'node:fs';
 
 import { validateSocks5hUrl } from '@toon-protocol/client';
 
+import { ADMIT_PER_MINUTE } from './admit.mjs';
 import { FOLLOW_TICK_MS } from './follow.mjs';
-import { publicKeyOf } from './nostr.mjs';
 import { RESOLVE_TIMEOUT_MS } from './resolve.mjs';
 import { readDialRewrites } from './rewrite.mjs';
 
@@ -41,34 +41,19 @@ export function readConfig(env, { readFile = (p) => readFileSync(p, 'utf8') } = 
   /** @type {string[]} */
   const problems = [];
 
-  /** A duration in milliseconds, or the default, or a named problem. */
-  const millis = (key, fallback) => {
+  /** A positive whole number, or the default, or a named problem in `unit`. */
+  const positive = (key, fallback, unit) => {
     if (env[key] === undefined) return fallback;
     const parsed = Number(env[key]);
     if (!Number.isInteger(parsed) || parsed < 1) {
-      problems.push(`${key} is not a number of milliseconds: ${JSON.stringify(env[key])}`);
+      problems.push(`${key} is not ${unit}: ${JSON.stringify(env[key])}`);
       return fallback;
     }
     return parsed;
   };
 
-  const secretKey = env.GATEWAY_SECRET_KEY;
-  let publicKey = null;
-  if (!secretKey) {
-    problems.push(
-      'GATEWAY_SECRET_KEY is required: it is this gateway\'s Nostr identity — the key a ' +
-        'tenant names in a Gateway Grant (spec §3.1.3) and the key it signs `status` with (§6.5).',
-    );
-  } else {
-    try {
-      publicKey = publicKeyOf(secretKey);
-    } catch {
-      problems.push(
-        'GATEWAY_SECRET_KEY must be a 32-byte Nostr secret key as 64 hex characters ' +
-          '(an `nsec…` is not accepted; decode it first).',
-      );
-    }
-  }
+  /** A duration in milliseconds, or the default, or a named problem. */
+  const millis = (key, fallback) => positive(key, fallback, 'a number of milliseconds');
 
   const domain = env.GATEWAY_DOMAIN?.trim().toLowerCase().replace(/\.$/, '');
   if (!domain) {
@@ -85,8 +70,9 @@ export function readConfig(env, { readFile = (p) => readFileSync(p, 'utf8') } = 
     .filter((relay) => relay !== '');
   if (relays.length === 0) {
     problems.push(
-      'GATEWAY_RELAYS is required: it is where this gateway watches for the Gateway Grants ' +
-        'that name it (spec §3.1.3). Comma-separated `ws://` or `wss://` URLs.',
+      'GATEWAY_RELAYS is required: it is where this gateway looks for the Provider Profiles of ' +
+        'the members a handover names, and for the Takeovers that move a workload between them ' +
+        '(spec §12.4, §12.7). Comma-separated `ws://` or `wss://` URLs.',
     );
   }
   for (const relay of relays) {
@@ -103,6 +89,22 @@ export function readConfig(env, { readFile = (p) => readFileSync(p, 'utf8') } = 
     env.GATEWAY_HTTP_PORT === undefined
       ? null
       : port(env.GATEWAY_HTTP_PORT, 'GATEWAY_HTTP_PORT', problems);
+
+  // Where this gateway's connector forwards a sealed Gateway Handover (spec
+  // §12.1). Its OWN port, never a path on the listeners that front workloads:
+  // a reserved path would carve a hole out of every tenant's URL space, which
+  // §12.5 forbids. A gateway without one can never be told anything, so it is
+  // required rather than defaulted.
+  let handoverPort = null;
+  if (env.GATEWAY_HANDOVER_PORT === undefined) {
+    problems.push(
+      'GATEWAY_HANDOVER_PORT is required: it is where this gateway\'s connector forwards a ' +
+        'sealed Gateway Handover (spec §12.1), and the only way a tenant can tell this gateway ' +
+        'to serve a workload. It should not be reachable from outside the connector.',
+    );
+  } else {
+    handoverPort = port(env.GATEWAY_HANDOVER_PORT, 'GATEWAY_HANDOVER_PORT', problems);
+  }
 
   // TLS for this gateway's OWN domain, so a workload is reachable over HTTPS
   // while holding no certificate itself and no provider ever touches a
@@ -124,7 +126,7 @@ export function readConfig(env, { readFile = (p) => readFileSync(p, 'utf8') } = 
     }
   } else if (httpPort === null) {
     problems.push(
-      'this gateway has nothing to listen on: set GATEWAY_TLS_CERT and GATEWAY_TLS_KEY to ' +
+      'this gateway has nothing to front a workload on: set GATEWAY_TLS_CERT and GATEWAY_TLS_KEY to ' +
         'terminate TLS for GATEWAY_DOMAIN, or GATEWAY_HTTP_PORT for a plain-HTTP listener in ' +
         'development.',
     );
@@ -141,6 +143,16 @@ export function readConfig(env, { readFile = (p) => readFileSync(p, 'utf8') } = 
   // counted in the grant's and the Profile's own seconds, and this is only how
   // late this process may be in noticing that one has passed.
   const followTickMs = millis('GATEWAY_FOLLOW_TICK_MS', FOLLOW_TICK_MS);
+
+  // How many admission rounds one Standby Set member may be asked for in a
+  // minute (spec §12.1). Anyone can seal a handover naming any provider, so
+  // one sealed packet buys one free `status` per member it names; this is what
+  // stops a burst of unsolicited handovers making a reflector of this gateway.
+  const admitPerMinute = positive(
+    'GATEWAY_ADMIT_PER_MINUTE',
+    ADMIT_PER_MINUTE,
+    'a number of admissions a minute',
+  );
 
   // The anon client every `.anyone` host is dialled through (`src/dial.mjs`).
   // Validated here so a deployment that meant to front a Hidden Provider's
@@ -180,19 +192,18 @@ export function readConfig(env, { readFile = (p) => readFileSync(p, 'utf8') } = 
   }
 
   return {
-    /** The key this gateway is named by in a grant, and signs `status` with. */
-    publicKey: /** @type {string} */ (publicKey),
-    /** A call, not a field: a secret key that is never in a log line or a dump. */
-    secretKey: () => /** @type {string} */ (secretKey),
     domain: /** @type {string} */ (domain),
     relays,
     bindAddress: env.GATEWAY_BIND_ADDR ?? '0.0.0.0',
     httpsPort: tls === null ? null : httpsPort,
     httpPort,
+    /** Where the connector forwards a sealed Gateway Handover (spec §12.1). */
+    handoverPort: /** @type {number} */ (handoverPort),
     tls,
     socksProxy,
     resolveTimeoutMs,
     followTickMs,
+    admitPerMinute,
     dialRewrites,
   };
 }

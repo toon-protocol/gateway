@@ -1,13 +1,14 @@
 // Finding where a granted workload is running, and sending the tenant there.
 //
-// RESOLUTION FOLLOWS THE GRANT AND NOTHING ELSE (spec §12). The grant names
-// the Standby Set; each member's Provider Profile says where its connector is;
-// every member is asked for `status` with a request this gateway signed and
-// the grant inside it; the member answering `running` with `access` is the one
-// running the workload. Members are asked in parallel because a Standby Set is
-// several providers and a slow one must not hold up the others, and the answer
-// is taken in `standby_set` order — primary first — so a Takeover that has
-// settled in two places at once still resolves the same way everywhere.
+// RESOLUTION FOLLOWS THE GRANT AND NOTHING ELSE (spec §12). The handover that
+// brought the grant names the Standby Set; each member's Provider Profile says
+// where its connector is; every member is asked for `status` with the grant
+// presented as the request's `continuation`; the member answering `running`
+// with `access` is the one running the workload. Members are asked in parallel
+// because a Standby Set is several providers and a slow one must not hold up
+// the others, and the answer is taken in `standby_set` order — primary first —
+// so a Takeover that has settled in two places at once still resolves the same
+// way everywhere.
 //
 // A member that answers `reserved`, `stopped` or an ending is simply not the
 // target: that is a Warm Standby doing its job (spec §6.7), not a failure.
@@ -47,7 +48,7 @@ export const RESOLVE_TIMEOUT_MS = 3000;
 /**
  * The host port a granted `http_port` was published at.
  *
- * `http_port` is the CONTAINER port the spawn asked for (spec §3.1.3); the
+ * `http_port` is the CONTAINER port the spawn asked for (spec §12.1); the
  * host port is the provider's to choose and comes back in `access`. Neither
  * the first port nor the SSH port is it, and guessing either would put a
  * tenant's traffic into whatever else the workload exposes.
@@ -63,7 +64,6 @@ export function hostPortFor(access, httpPort) {
 
 /**
  * @param {{
- *   secretKey: () => string,
  *   profiles: ReturnType<typeof import('./profiles.mjs').createProfiles>,
  *   dialer?: { connect: import('./dial.mjs').Dial },
  *   now?: () => number,
@@ -72,7 +72,6 @@ export function hostPortFor(access, httpPort) {
  * }} deps
  */
 export function createResolver({
-  secretKey,
   profiles,
   dialer,
   now = () => Math.floor(Date.now() / 1000),
@@ -122,10 +121,10 @@ export function createResolver({
       answered = await askStatus({
         connectorUrl: profile.connectorUrl,
         request: statusRequest({
-          secretKey: secretKey(),
           member,
           workloadId: grant.workloadId,
-          grantEvent: grant.event,
+          grant: grant.grantFor(member),
+          gatewayExpiresAt: grant.expiresAt,
           now: now(),
         }),
         timeoutMs,
@@ -162,42 +161,41 @@ export function createResolver({
     return { told: true, target: { host: body.access.host, port, member, at: now() } };
   };
 
-  /** Ask every member, and take the first that is running. */
-  const ask = async (grant) => {
+  /**
+   * ONE BOUNDED ROUND: every member is sent `status`, all of them and at once.
+   *
+   * It records nothing. `told` is how many members answered ABOUT THE LEASE,
+   * which is both what §12.4 resolves on and what admission proves a grant
+   * with (`src/admit.mjs`): a member that takes the grant is a member only the
+   * holder of the lease's Continuation Token could have produced one for.
+   *
+   * @returns {Promise<{ told: number, target?: any, unavailable?: ReturnType<typeof unavailable> }>}
+   */
+  const askMembers = async (grant) => {
     const members = grant.standbySet;
     profiles.watch(members);
     await profiles.waitFor(members, { timeoutMs });
 
     const answers = await Promise.all(members.map((member) => askMember(grant, member)));
+    const silent = answers.filter((answer) => !answer.told);
+    const told = answers.length - silent.length;
 
     // `standby_set` order, primary first: whichever members happened to answer
     // first, the same Standby Set resolves the same way on every gateway.
     const found = answers.find((answer) => answer.told && answer.target !== undefined);
-    if (found?.target !== undefined) {
-      const target = /** @type {any} */ (found.target);
-      const held = targets.get(grant.workloadId);
-      if (held?.host !== target.host || held?.port !== target.port) {
-        log(
-          `workload ${grant.workloadId} is running at ${target.host}:${target.port} ` +
-            `on member ${target.member}`,
-        );
-      }
-      targets.set(grant.workloadId, target);
-      return { target };
-    }
+    if (found?.target !== undefined) return { told, target: found.target };
 
-    targets.delete(grant.workloadId);
-    const silent = answers.filter((answer) => !answer.told);
     // A member this gateway would not even dial is answered by name: no
     // proxy is something the operator fixes, and `member_unreachable` would
     // send them looking at the member.
     const notDialled = silent.find((answer) => answer.refusal !== undefined);
     if (notDialled?.refusal !== undefined) {
       log(`workload ${grant.workloadId}: ${notDialled.why}`);
-      return { unavailable: notDialled.refusal };
+      return { told, unavailable: notDialled.refusal };
     }
     if (silent.length === 0) {
       return {
+        told,
         unavailable: unavailable('no_running_member', {
           workloadId: grant.workloadId,
           members: members.length,
@@ -209,7 +207,29 @@ export function createResolver({
       `workload ${grant.workloadId}: ${silent.length} of ${members.length} member(s) told this ` +
         `gateway nothing about the lease: ${why}`,
     );
-    return { unavailable: unavailable('member_unreachable', { workloadId: grant.workloadId, why }) };
+    return {
+      told,
+      unavailable: unavailable('member_unreachable', { workloadId: grant.workloadId, why }),
+    };
+  };
+
+  /** Ask every member, and take the first that is running, remembering it. */
+  const ask = async (grant) => {
+    const round = await askMembers(grant);
+    if (round.target !== undefined) {
+      const target = round.target;
+      const held = targets.get(grant.workloadId);
+      if (held?.host !== target.host || held?.port !== target.port) {
+        log(
+          `workload ${grant.workloadId} is running at ${target.host}:${target.port} ` +
+            `on member ${target.member}`,
+        );
+      }
+      targets.set(grant.workloadId, target);
+      return { target };
+    }
+    targets.delete(grant.workloadId);
+    return { unavailable: round.unavailable };
   };
 
   /** Start a resolution, or join the one already running for this workload. */
@@ -250,9 +270,20 @@ export function createResolver({
     resolve,
     /** Ask the Standby Set again, now (M5-5's Takeover and cadence hook). */
     resolveNow,
+    /**
+     * The admission round of §12.1: one round, recording nothing.
+     *
+     * It deliberately does NOT join `resolveNow`'s in-flight attempt and does
+     * not touch `targets`. A handover this gateway has not accepted must not
+     * be able to ride on a round started for the grant it holds, nor drop the
+     * target of a workload already being served by failing.
+     */
+    probe: askMembers,
+    /** Serve a workload at a target the admission round already found. */
+    remember: (workloadId, target) => targets.set(workloadId, target),
     /** Where a workload is running, as far as this gateway knows. */
     current: (workloadId) => targets.get(workloadId),
-    /** Stop serving a workload's last known target (M5-5: expiry, rotation). */
+    /** Stop serving a workload's last known target (M5-5: a grant that ran out). */
     forget: (workloadId) => targets.delete(workloadId),
     close() {
       targets.clear();

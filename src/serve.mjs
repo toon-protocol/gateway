@@ -10,7 +10,8 @@
 // workload this gateway holds a grant for, and the grant is in force.
 //
 // A hostname that is none of those is answered 503 by the gateway itself and
-// NOTHING is dialled: no provider is asked about a workload nobody granted.
+// NOTHING is dialled: no provider is asked about a workload nobody granted,
+// and no relay is read on its account. A gateway is not a probe.
 
 import { labelUnder } from './hostname.mjs';
 import { renderUnavailable, unavailable } from './reasons.mjs';
@@ -27,7 +28,7 @@ import { renderUnavailable, unavailable } from './reasons.mjs';
  * nothing included, means the resolver answered the request itself.
  *
  * @typedef {(context: {
- *   grant: ReturnType<typeof import('./grant.mjs').readGrant>,
+ *   grant: ReturnType<typeof import('./handover.mjs').readHandover>,
  *   req: import('node:http').IncomingMessage,
  *   res?: import('node:http').ServerResponse,
  *   socket?: import('node:stream').Duplex,

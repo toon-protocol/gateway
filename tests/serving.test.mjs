@@ -8,19 +8,22 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 
 import { canonicalLabel } from '../src/hostname.mjs';
-import { K_GATEWAY_GRANT } from '../src/kinds.mjs';
-import { CONSTANTS, gatewayGrant } from './helpers/events.mjs';
-import { DOMAIN, startTestGateway, until } from './helpers/harness.mjs';
+import { K_TAKEOVER } from '../src/kinds.mjs';
+import { CONSTANTS } from './helpers/events.mjs';
+import { gatewayHandover } from './helpers/handover.mjs';
+import { DOMAIN, admitAll, startTestGateway, until } from './helpers/harness.mjs';
 import { startStubConnector } from './helpers/stub-connector.mjs';
 
-const GATEWAY = CONSTANTS.gateway.public_key;
 const WORKLOAD = 'aa'.repeat(32);
 const OTHER_WORKLOAD = 'bb'.repeat(32);
-const grantFor = (overrides = {}) =>
-  gatewayGrant({ workloadId: WORKLOAD, gateway: GATEWAY, ...overrides });
+const handoverFor = (overrides = {}) => gatewayHandover({ workloadId: WORKLOAD, ...overrides });
 
 /**
  * A resolver that answers with what it was given, so a test can see it.
+ *
+ * Every test here is about the HOSTNAME, so both seams downstream of it are
+ * stubbed: `admitAll` for the round a handover is admitted on, this for where
+ * the workload runs.
  * @type {import('../src/serve.mjs').Resolver}
  */
 const echoGrant = async ({ grant, res }) => {
@@ -29,98 +32,59 @@ const echoGrant = async ({ grant, res }) => {
   return { served: true };
 };
 
-describe('grant discovery', () => {
-  it('serves a workload whose grant was already on the relay, with no contact from the tenant', async (t) => {
-    const gateway = await startTestGateway({ events: [grantFor()], resolve: echoGrant });
-    t.after(() => gateway.close());
-
-    const answered = await gateway.get(gateway.hostFor(WORKLOAD));
-    assert.equal(answered.status, 200);
-    assert.equal(answered.json().workloadId, WORKLOAD);
-  });
-
-  it('finds every grant naming it with ONE filter: kind 30438, #p its own key', async (t) => {
-    const gateway = await startTestGateway({ resolve: echoGrant });
-    t.after(() => gateway.close());
-
-    const grantRequests = gateway.relay.requests.filter((r) =>
-      r.filters.some((f) => f.kinds?.includes(K_GATEWAY_GRANT)),
-    );
-    assert.equal(grantRequests.length, 1, 'one subscription, not one per workload');
-    assert.equal(grantRequests[0].filters.length, 1);
-    assert.deepEqual(grantRequests[0].filters[0], { kinds: [K_GATEWAY_GRANT], '#p': [GATEWAY] });
-  });
-
-  it('picks up a grant published while it is running', async (t) => {
-    const gateway = await startTestGateway({ resolve: echoGrant });
+describe('being handed a workload', () => {
+  it('serves a workload a tenant sealed one packet for, holding no account for it', async (t) => {
+    const gateway = await startTestGateway({ probe: admitAll, resolve: echoGrant });
     t.after(() => gateway.close());
 
     const host = gateway.hostFor(WORKLOAD);
     assert.equal((await gateway.get(host)).status, 503);
 
-    gateway.publish(grantFor());
-    await gateway.untilServed(host);
+    const answered = await gateway.handover(handoverFor());
+    assert.equal(answered.status, 200);
+    assert.equal(answered.json().hostname, host);
     assert.equal((await gateway.get(host)).json().workloadId, WORKLOAD);
   });
 
-  it('replaces the grant it holds when a later one for the same workload arrives', async (t) => {
+  it('watches no relay for a grant: there is nothing published to find', async (t) => {
+    const gateway = await startTestGateway({ probe: admitAll, resolve: echoGrant });
+    t.after(() => gateway.close());
+
+    await gateway.handover(handoverFor());
+    // Kind 30438 is gone (ADR 0016) and so is the `#p` filter that found it.
+    // What is left on a workload's account is its members' Profiles and its
+    // Takeovers, and both are opened by the workloads being served.
+    const kinds = gateway.relay.requests.flatMap((r) => r.filters.flatMap((f) => f.kinds ?? []));
+    assert.equal(kinds.includes(30438), false, 'no grant filter');
+    assert.equal(
+      gateway.relay.requests.some((r) => r.filters.some((f) => f['#p'] !== undefined)),
+      false,
+      'nothing is subscribed to on this gateway\'s own key',
+    );
+  });
+
+  it('replaces the grant it holds when a later handover is admitted', async (t) => {
     const gateway = await startTestGateway({
-      events: [grantFor({ createdAt: 1700000000, httpPort: 8080 })],
+      probe: admitAll,
       resolve: echoGrant,
+      handovers: [handoverFor({ httpPort: 8080 })],
     });
     t.after(() => gateway.close());
 
     const host = gateway.hostFor(WORKLOAD);
     assert.equal((await gateway.get(host)).json().httpPort, 8080);
 
-    gateway.publish(grantFor({ createdAt: 1700000100, httpPort: 9090, name: 'shop' }));
-    await until(async () => (await gateway.get(host)).json().httpPort === 9090, {
-      what: 'the later grant to replace the earlier one',
-    });
+    await gateway.handover(handoverFor({ httpPort: 9090, name: 'shop' }));
     const answered = await gateway.get(host);
     assert.equal(answered.json().httpPort, 9090);
-    assert.equal(answered.json().name, 'shop', '`name` is carried, for M5-4 to serve');
+    assert.equal(answered.json().name, 'shop', '`name` is carried, for §12.6 to serve');
   });
 
-  it('does not serve a workload granted to another gateway', async (t) => {
-    const elsewhere = gatewayGrant({ workloadId: WORKLOAD, gateway: 'cc'.repeat(32) });
-    const gateway = await startTestGateway({ events: [elsewhere], resolve: echoGrant });
-    t.after(() => gateway.close());
-
-    const answered = await gateway.get(gateway.hostFor(WORKLOAD));
-    assert.equal(answered.status, 503);
-    assert.equal(answered.headers['toon-gateway-reason'], 'no_grant');
-  });
-
-  it('sees a rotation to another gateway, which its own `#p` filter cannot carry', async (t) => {
-    // A grant rotating a workload away names the NEW gateway in its `p` tag
-    // (spec §3.1.3), so the filter above does not carry it. What delivers it
-    // is a second watch, on the workload ids this gateway holds (§12.7).
+  it('keeps serving a workload whose handover carried an unusable name', async (t) => {
     const gateway = await startTestGateway({
-      events: [grantFor({ createdAt: 1700000000 })],
+      probe: admitAll,
       resolve: echoGrant,
-    });
-    t.after(() => gateway.close());
-
-    const byWorkload = () =>
-      gateway.relay.requests.filter((r) =>
-        r.filters.some((f) => f.kinds?.includes(K_GATEWAY_GRANT) && f['#d'] !== undefined),
-      );
-    await until(() => byWorkload().length > 0, { what: 'the watch on the workloads held' });
-    assert.equal(byWorkload().length, 1, 'one watch for every workload held, not one each');
-    assert.deepEqual(byWorkload()[0].filters[0], { kinds: [K_GATEWAY_GRANT], '#d': [WORKLOAD] });
-
-    const host = gateway.hostFor(WORKLOAD);
-    assert.equal((await gateway.get(host)).status, 200);
-
-    gateway.publish(grantFor({ createdAt: 1700000100, gateway: 'cc'.repeat(32) }));
-    await gateway.untilReason(host, 'no_grant');
-  });
-
-  it('keeps serving a workload whose grant carried an unusable name', async (t) => {
-    const gateway = await startTestGateway({
-      events: [grantFor({ name: 'not a label' })],
-      resolve: echoGrant,
+      handovers: [handoverFor({ name: 'not a label' })],
     });
     t.after(() => gateway.close());
 
@@ -129,19 +93,23 @@ describe('grant discovery', () => {
     assert.equal(answered.json().name, null);
   });
 
-  it('keeps serving the others when a malformed grant arrives', async (t) => {
-    const gateway = await startTestGateway({ events: [grantFor()], resolve: echoGrant });
+  it('keeps serving the others when a handover that is not one arrives', async (t) => {
+    const gateway = await startTestGateway({
+      probe: admitAll,
+      resolve: echoGrant,
+      handovers: [handoverFor()],
+    });
     t.after(() => gateway.close());
 
-    gateway.publish({ id: 'f'.repeat(64), pubkey: 'f'.repeat(64), sig: 'f'.repeat(128), kind: K_GATEWAY_GRANT, created_at: 1700000000, tags: [['d', OTHER_WORKLOAD], ['p', GATEWAY]], content: '{}' });
-    const answered = await gateway.get(gateway.hostFor(WORKLOAD));
-    assert.equal(answered.status, 200);
+    const refused = await gateway.handover({ handover: { workload_id: OTHER_WORKLOAD } });
+    assert.equal(refused.json().error, 'invalid_handover');
+    assert.equal((await gateway.get(gateway.hostFor(WORKLOAD))).status, 200);
   });
 });
 
 describe('the canonical hostname', () => {
   it('serves the lowercase unpadded base32 of the workload id, under its domain', async (t) => {
-    const gateway = await startTestGateway({ events: [grantFor()], resolve: echoGrant });
+    const gateway = await startTestGateway({ probe: admitAll, resolve: echoGrant, handovers: [handoverFor()] });
     t.after(() => gateway.close());
 
     const host = `vkvkvkvkvkvkvkvkvkvkvkvkvkvkvkvkvkvkvkvkvkvkvkvkvkva.${DOMAIN}`;
@@ -150,7 +118,7 @@ describe('the canonical hostname', () => {
   });
 
   it('recognises the hostname however DNS spelled it: case, port, trailing dot', async (t) => {
-    const gateway = await startTestGateway({ events: [grantFor()], resolve: echoGrant });
+    const gateway = await startTestGateway({ probe: admitAll, resolve: echoGrant, handovers: [handoverFor()] });
     t.after(() => gateway.close());
 
     const label = canonicalLabel(WORKLOAD);
@@ -160,7 +128,7 @@ describe('the canonical hostname', () => {
   });
 
   it('is not the hex workload id, which no DNS label could hold', async (t) => {
-    const gateway = await startTestGateway({ events: [grantFor()], resolve: echoGrant });
+    const gateway = await startTestGateway({ probe: admitAll, resolve: echoGrant, handovers: [handoverFor()] });
     t.after(() => gateway.close());
 
     const answered = await gateway.get(`${WORKLOAD}.${DOMAIN}`);
@@ -171,7 +139,7 @@ describe('the canonical hostname', () => {
 
 describe('the error page', () => {
   it('answers a hostname with no grant 503, naming that reason', async (t) => {
-    const gateway = await startTestGateway({ resolve: echoGrant });
+    const gateway = await startTestGateway({ probe: admitAll, resolve: echoGrant });
     t.after(() => gateway.close());
 
     const answered = await gateway.get(gateway.hostFor(OTHER_WORKLOAD));
@@ -182,10 +150,11 @@ describe('the error page', () => {
   });
 
   it('tells an expired grant apart from a workload nobody granted', async (t) => {
-    let now = 1700000000;
+    let now = CONSTANTS.now;
     const gateway = await startTestGateway({
-      events: [grantFor({ expiresAt: 1700000100 })],
+      probe: admitAll,
       resolve: echoGrant,
+      handovers: [handoverFor({ expiresAt: CONSTANTS.now + 100 })],
       now: () => now,
     });
     t.after(() => gateway.close());
@@ -193,15 +162,16 @@ describe('the error page', () => {
     const host = gateway.hostFor(WORKLOAD);
     assert.equal((await gateway.get(host)).status, 200);
 
-    now = 1700000101;
+    now = CONSTANTS.now + 101;
     const answered = await gateway.get(host);
     assert.equal(answered.status, 503);
     assert.equal(answered.headers['toon-gateway-reason'], 'grant_expired');
     assert.match(answered.json().message, /expired/i);
 
-    // And it starts serving again the moment the tenant republishes, with no
-    // restart: renewal and publication are the same act (spec §3.1.3).
-    gateway.publish(grantFor({ createdAt: 1700000200, expiresAt: 1700009999 }));
+    // And it starts serving again the moment the tenant hands over a grant
+    // derived for a later moment, with no restart: renewal is re-derivation
+    // (spec §6.5.1).
+    await gateway.handover(handoverFor({ expiresAt: CONSTANTS.now + 9999 }));
     await gateway.untilServed(host);
   });
 
@@ -210,7 +180,8 @@ describe('the error page', () => {
     // where the workload runs is not known — never a dropped connection, and
     // tellably different from a stopped workload.
     const gateway = await startTestGateway({
-      events: [grantFor()],
+      probe: admitAll,
+      handovers: [handoverFor()],
       resolve: async () => {
         throw new Error('a bug in the resolver');
       },
@@ -224,7 +195,7 @@ describe('the error page', () => {
   });
 
   it('answers a browser a page it can read, and JSON to everything else', async (t) => {
-    const gateway = await startTestGateway({});
+    const gateway = await startTestGateway({ probe: admitAll });
     t.after(() => gateway.close());
 
     const host = gateway.hostFor(OTHER_WORKLOAD);
@@ -237,7 +208,7 @@ describe('the error page', () => {
   });
 
   it('refuses a WebSocket upgrade to an ungranted hostname with the same reason', async (t) => {
-    const gateway = await startTestGateway({});
+    const gateway = await startTestGateway({ probe: admitAll });
     t.after(() => gateway.close());
 
     const answered = await gateway.get(gateway.hostFor(OTHER_WORKLOAD), {
@@ -255,13 +226,23 @@ describe('a hostname nobody granted', () => {
 
     let resolverCalls = 0;
     const gateway = await startTestGateway({
-      events: [grantFor()],
+      probe: admitAll,
+      handovers: [handoverFor()],
       resolve: async (context) => {
         resolverCalls += 1;
         return echoGrant(context);
       },
     });
     t.after(() => gateway.close());
+
+    // Let the workload this gateway DOES serve open everything it opens — its
+    // members' Profiles and its Takeover watch — so that what is counted below
+    // is only what the ungranted hostnames cost.
+    await until(
+      () => gateway.relay.requests.some((r) => r.filters.some((f) => f.kinds?.includes(K_TAKEOVER))),
+      { what: 'the watches of the workload being served' },
+    );
+    const relayReads = gateway.relay.requests.length;
 
     for (const host of [
       gateway.hostFor(OTHER_WORKLOAD),      // a workload nobody granted us
@@ -277,5 +258,6 @@ describe('a hostname nobody granted', () => {
 
     assert.equal(resolverCalls, 0, 'nothing was resolved');
     assert.equal(connector.requests.length, 0, 'no provider was asked anything');
+    assert.equal(gateway.relay.requests.length, relayReads, 'and no relay was read on its account');
   });
 });
