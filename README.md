@@ -53,6 +53,15 @@ rotation of the grant's moment and a change of Standby Set are all the same
 act, and all take effect with no restart. Nothing is weighed to decide which
 of two is current, because getting past admission is already the proof.
 
+**Rotation needs nothing of its own here.** A tenant that rotates its lease's
+Continuation Tokens (spec §6.8) revokes every grant derived from the old ones,
+and the members answer the grant this gateway holds `bad_grant` — which
+resolution already counts as a member that told it nothing, so the hostname
+answers `503 member_unreachable`. A tenant that keeps the gateway seals a
+handover of grants derived from the new tokens, and the ordinary admission
+round admits it and replaces what was held.
+[`tests/rotation.test.mjs`](tests/rotation.test.mjs) pins both.
+
 ### Two consequences, written down rather than discovered
 
 **The amplification is about one to one.** Anyone can seal a handover naming
@@ -300,8 +309,8 @@ dialled and no relay is read to answer one.
 
 **A withdrawal ends serving, not reading.** The withdrawn gateway keeps a
 **working grant** until its `expires_at` and could still ask a provider for
-`status` with it — there is no revocation before expiry (spec §6.5.1), and
-nothing here claims otherwise. What ends, at once, is this process serving the
+`status` with it — a withdrawal revokes nothing, and nothing here claims
+otherwise. What ends, at once, is this process serving the
 workload: it stops forwarding it, stops following it, and gives up its
 readable name for the next grant that asks for it. An *expired* grant, by
 contrast, keeps its name until another claims it, so a tenant whose readable
