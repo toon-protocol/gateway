@@ -125,8 +125,13 @@ connector reads.
 openssl rand -hex 32 > signer.key             # THIS GATEWAY'S IDENTITY
 openssl rand -hex 32 > settlement.key         # the EVM settlement key
 openssl rand -hex 32 > settlement-solana.key  # the Solana settlement key
-chmod 600 *.key
 ```
+
+`render.sh` sets their mode and hands them to uid 10001, which is what the
+connector runs as. That used to be a step in a runbook, and a step a human has
+to remember is a step a human forgets — the failure is a container that
+restarts forever with `failed to read signer key_file at
+/app/data/signer.key: Permission denied` while everything around it looks fine.
 
 `signer.key` is the key a tenant **seals its handover to**. The gateway process
 itself holds no key at all — nothing is signed and nothing is published on
