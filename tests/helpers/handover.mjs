@@ -98,3 +98,34 @@ export function asProvider({
     return answer(context);
   };
 }
+
+/**
+ * The body of a Gateway Withdrawal: `{ "withdrawal": … }` and nothing else.
+ *
+ * The same member encoding a handover carries — each member with the grant
+ * derived FOR ITS OWN KEY at the moment `expiresAt` names — because it is the
+ * same fact, and because bearing the grant is the whole of what makes a
+ * withdrawal safe without a signature (spec §12.7).
+ *
+ * @param {{
+ *   workloadId: string, standbySet?: string[], expiresAt?: any,
+ *   rootSecret?: string, grantFor?: (member: string) => any, members?: any,
+ * }} options
+ */
+export function gatewayWithdrawal({
+  workloadId,
+  standbySet = [CONSTANTS.provider.public_key],
+  expiresAt = CONSTANTS.now + 86_400,
+  rootSecret = CONSTANTS.tenant.root_secret,
+  grantFor = (member) => grantFrom(rootSecret, member, expiresAt),
+  members,
+}) {
+  return {
+    withdrawal: {
+      workload_id: workloadId,
+      expires_at: expiresAt,
+      standby_set:
+        members ?? standbySet.map((member) => ({ provider: member, grant: grantFor(member) })),
+    },
+  };
+}

@@ -19,6 +19,11 @@
 // with the reason that no grant exists, and so a grant handed over again by
 // its tenant starts serving with no restart and no timer (M5-5).
 //
+// A WITHDRAWAL takes a workload out of all three maps at once (`release`),
+// because a tenant that withdrew a workload gave up its readable name with it
+// (spec §12.6, §12.7). It takes nothing away from the grant, which goes on
+// working at the members until its moment passes.
+//
 // A readable `name` is the one thing decided here and not there, because it is
 // the one thing that is not derived: two tenants may ask for `shop`, and only
 // one can have it. It is FIRST COME, FIRST SERVED among the grants this
@@ -41,7 +46,7 @@ export function createHeldGrants({
   now = () => Math.floor(Date.now() / 1000),
   log = () => {},
 } = {}) {
-  /** @type {Map<string, ReturnType<typeof import('./handover.mjs').readHandover>>} workload id -> its handover */
+  /** @type {Map<string, ReturnType<typeof import('./messages.mjs').readHandover>>} workload id -> its handover */
   const held = new Map();
   /** @type {Map<string, string>} canonical hostname label -> workload id */
   const labels = new Map();
@@ -122,6 +127,25 @@ export function createHeldGrants({
           `${label}, until ${new Date(handover.expiresAt * 1000).toISOString()}`,
       );
       return handover;
+    },
+
+    /** The handover held for one workload, or `undefined`. */
+    heldFor(workloadId) {
+      return held.get(workloadId);
+    },
+
+    /**
+     * Stop serving a workload: its canonical hostname and its readable name,
+     * at once (spec §12.7).
+     *
+     * The grant itself is NOT ended by this and could not be: it is a value
+     * the tenant derived and the members accept until its moment passes (spec
+     * §6.5.1). What ends here is this gateway serving the workload.
+     */
+    release(workloadId) {
+      held.delete(workloadId);
+      labels.delete(canonicalLabel(workloadId));
+      releaseNamesOf(workloadId);
     },
 
     /** The grant served at one hostname label, or `undefined`. */

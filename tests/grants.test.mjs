@@ -4,7 +4,7 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 
 import { createHeldGrants } from '../src/grants.mjs';
-import { readHandover } from '../src/handover.mjs';
+import { readHandover } from '../src/messages.mjs';
 import { canonicalLabel } from '../src/hostname.mjs';
 import { CONSTANTS } from './helpers/events.mjs';
 import { gatewayHandover } from './helpers/handover.mjs';

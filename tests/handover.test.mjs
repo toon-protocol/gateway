@@ -9,7 +9,7 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 
-import { MAX_STANDBY_SET, readHandover } from '../src/handover.mjs';
+import { MAX_STANDBY_SET, readHandover } from '../src/messages.mjs';
 import { CONSTANTS } from './helpers/events.mjs';
 import { gatewayHandover, grantFrom } from './helpers/handover.mjs';
 

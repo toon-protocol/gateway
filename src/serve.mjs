@@ -28,7 +28,7 @@ import { renderUnavailable, unavailable } from './reasons.mjs';
  * nothing included, means the resolver answered the request itself.
  *
  * @typedef {(context: {
- *   grant: ReturnType<typeof import('./handover.mjs').readHandover>,
+ *   grant: ReturnType<typeof import('./messages.mjs').readHandover>,
  *   req: import('node:http').IncomingMessage,
  *   res?: import('node:http').ServerResponse,
  *   socket?: import('node:stream').Duplex,
