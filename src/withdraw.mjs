@@ -23,9 +23,11 @@
 //
 // A WITHDRAWAL ENDS SERVING, NOT READING. The withdrawn gateway keeps a
 // working grant until its `expires_at`, and could still ask a provider for
-// `status` with it — there is no revocation before expiry (spec §6.5.1). What
-// ends, at once, is this gateway's SERVING: it stops forwarding the workload,
-// stops following it and gives up its readable name. Nothing here says, logs
+// `status` with it: a withdrawal revokes nothing. Only the tenant rotating
+// the lease's token does (spec §6.8), and that reaches this gateway as
+// `bad_grant` from the members, not as a message. What ends, at once, is this
+// gateway's SERVING: it stops forwarding the workload, stops following it and
+// gives up its readable name. Nothing here says, logs
 // or answers that a delegation was revoked, because none was.
 //
 // IT ASKS NOBODY. No provider is dialled and no relay is read to answer a
