@@ -27,8 +27,8 @@
 // the lease's token does (spec §6.8), and that reaches this gateway as
 // `bad_grant` from the members, not as a message. What ends, at once, is this
 // gateway's SERVING: it stops forwarding the workload, stops following it and
-// gives up its readable name. Nothing here says, logs
-// or answers that a delegation was revoked, because none was.
+// gives up its readable name. Nothing here says, logs or answers that a
+// delegation was revoked, because none was.
 //
 // IT ASKS NOBODY. No provider is dialled and no relay is read to answer a
 // withdrawal — a withdrawal for a workload this gateway does not hold reaches
