@@ -35,6 +35,14 @@ export const TLS = {
 
 export const DOMAIN = 'gw.test';
 
+/** The members a sealed handover's `standby_set` names, or none if it is not one. */
+const membersNamedBy = (body) => {
+  const set = body?.handover?.standby_set;
+  return Array.isArray(set)
+    ? set.map((entry) => entry?.provider).filter((provider) => typeof provider === 'string')
+    : [];
+};
+
 /**
  * An admission round that accepts anything, for a test about what happens
  * AFTER a workload is being served. It asks no member and finds no target.
@@ -234,6 +242,33 @@ export async function startTestGateway({
       await relay.close();
     },
   };
+
+  // ADMISSION IS ONE BOUNDED ROUND AND DOES NOT RETRY (`src/admit.mjs`): it
+  // proves a grant by asking the members for real, over a relay connection
+  // this gateway has only just opened. A handover this harness is told to
+  // start with is meant to be admitted for certain — but that round is real,
+  // and its first act is to look for Profiles it has not yet received. On a
+  // machine running the rest of the suite at the same time, a freshly spawned
+  // process can lose enough of its first turns to the CPU that the round's
+  // own timeout passes before the relay has delivered one, which is a fact
+  // about how busy the machine was and not about whether a member would have
+  // taken the grant (TOON_Network#109). Raising the timeout makes that
+  // instant rarer, not impossible.
+  //
+  // So the harness waits for the one thing the round needs — every named
+  // member's Profile already known, off the same relay connection admission
+  // asks over — and the round then starts knowing where to ask instead of
+  // racing its own setup to find out. A test that passes its own `probe`
+  // (most pass `admitAll`) reads no Profile, and there is nothing to wait for.
+  if (probe === undefined && handovers.length > 0) {
+    const members = [...new Set(handovers.flatMap(membersNamedBy))];
+    if (members.length > 0) {
+      gateway.profiles.watch(members);
+      await until(() => members.every((member) => gateway.profiles.get(member) !== undefined), {
+        what: 'every member a starting handover names to have a known Provider Profile',
+      });
+    }
+  }
 
   for (const body of handovers) {
     const answered = await harness.handover(body);
