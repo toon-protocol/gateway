@@ -82,7 +82,7 @@ describe('a sealed handover', () => {
     await gateway.handover(handoverFor({ expiresAt }));
 
     const [asked] = connector.requests;
-    assert.equal(asked.path, '/status');
+    assert.equal(asked.destination, connector.destination, 'the free `status` route of that member');
     assert.deepEqual(Object.keys(asked.body), ['request'], 'the packet body of §6.1.2');
     assert.equal(asked.request.op, 'status');
     assert.equal(asked.request.provider, MEMBER.public_key, 'exactly one provider is named');

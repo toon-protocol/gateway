@@ -104,15 +104,17 @@ The hostname is half of it; the other half is finding which provider is
 running the workload right now, and sending the request there.
 
 **Resolution follows the grant and nothing else.** The grant names the Standby
-Set. Each member's **Provider Profile** (spec §4.1) gives its `connector_url`
-and its Relay Set — a gateway looks for Profiles on the relays it is
-configured with, and then on the relays a Profile itself names, because a
-provider publishes to its *own* Relay Set. Every member is then sent `status`
-(spec §6.5) **at once**, each request presenting the grant derived for *that*
-member — nobody signs anything:
+Set. Each member's **Provider Profile** (spec §4.1) gives the three facts that
+reach it — `connector_url`, `ilp_address` and `connector_seal_key` — and its
+Relay Set: a gateway looks for Profiles on the relays it is configured with,
+and then on the relays a Profile itself names, because a provider publishes to
+its *own* Relay Set. Every member is then sent `status` (spec §6.5) **at
+once**, each request presenting the grant derived for *that* member — nobody
+signs anything:
 
 ```
-handover.standby_set ──▶ Profile(member).connector_url ──POST status──▶ member
+handover.standby_set ──▶ seal to Profile(member).connector_seal_key
+                         addressed <ilp_address>.status ──▶ connector_url
                          continuation = that member's grant
                                                        ◀── state, access ──
 ```
@@ -122,7 +124,10 @@ A member answering `reserved`, `stopped` or an ending is simply not the target
 — that is a Warm Standby doing its job, not a failure. A member that *refuses*
 (`bad_grant`, `unknown_workload`) is a third thing: it answered, and it told
 this gateway nothing about the lease, so it is counted with the members that
-could not be reached rather than with the ones that answered. Asking all members rather than the primary first is
+could not be reached rather than with the ones that answered. An answer that
+is **not a `status` document at all** — a 404 from a hop in front of the
+provider app, an HTML error page, an empty body — is counted the same way and
+for the stronger reason: the lease was never asked about. Asking all members rather than the primary first is
 the point: a Takeover moves a workload with no tenant online to say so, so the
 member listed first is exactly the one that may no longer have it.
 
@@ -160,14 +165,13 @@ hidden, because **this gateway is an ordinary client of the per-lease
 port of a running `anon` daemon, `TOON_SOCKS_PROXY` — and everything else
 about resolution and forwarding is unchanged (spec §12.8).
 
-**Both legs go through the same path**, [`src/dial.mjs`](src/dial.mjs), the
-one place either opens a connection:
+**Both legs go through the proxy, and only for `.anyone` hosts**:
 
 | Host | Dialled |
 |---|---|
-| A member's `connector_url` at an `.anyone` host | `status` goes through the proxy. |
-| A running member's `access.host` that is an `.anyone` name | The request is forwarded through the proxy. |
-| Anything else | Directly. |
+| A member's `connector_url` at an `.anyone` host | `status` goes through the proxy — the connector client is given it (`src/status.mjs`). |
+| A running member's `access.host` that is an `.anyone` name | The request is forwarded through the proxy ([`src/dial.mjs`](src/dial.mjs)). |
+| Anything else | Directly, on either leg. |
 
 So a Standby Set mixing a public primary with a hidden standby works with no
 configuration beyond the proxy: each member is dialled the way its own
@@ -341,7 +345,7 @@ Environment only; there is no config file.
 | `GATEWAY_FOLLOW_TICK_MS` | `1000` | How often this process looks at the clock while following a workload. It decides **nothing**: a settle window and a Liveness cadence are counted in the grant's and the Profile's own seconds, and this is only how late it may be in noticing that one has passed. Tests set it to tens of milliseconds so a clock they control is noticed at once. |
 | `GATEWAY_ADMIT_PER_MINUTE` | `6` | How many admission rounds any one provider may be asked for in a minute. Anyone can seal a handover naming any provider, so this is what stops a burst of unsolicited handovers making a reflector of this process; a handover naming a member that is over its rate is refused whole, and nothing is asked. |
 | `TOON_SOCKS_PROXY` | — | `socks5h://<host>:<port>`: the SOCKS5 port of a running `anon` daemon, through which every `.anyone` host is dialled. Without it, a workload on a Hidden Provider is refused with `no_proxy`. The scheme must be `socks5h`: under plain `socks5` this process would resolve the destination itself, putting a hidden service into a plaintext DNS query. |
-| `GATEWAY_DIAL_REWRITE` | `{}` | **Development only.** A JSON map from an advertised `host` or `host:port` to the `host` or `host:port` this process dials instead — a member's `connector_url` and the `access.host` it answers name the member as *its* clients reach it, and on a compose network that is not where this container reaches it. Applied at the one dial seam, so `status` and forwarding agree; rewrites no URL and no header. The sandbox's value is in `infra/sandbox/conf/workload-gateway.conf`. Empty in production, where the advertised address is the real one. |
+| `GATEWAY_DIAL_REWRITE` | `{}` | **Development only.** A JSON map from an advertised `host` or `host:port` to the `host` or `host:port` this process dials instead — a member's `connector_url` and the `access.host` it answers name the member as *its* clients reach it, and on a compose network that is not where this container reaches it. The forwarding leg applies it at the dial seam and the `status` leg to the connector's URL, so the two agree; it moves the socket and rewrites no header, no destination and no sealing key. The sandbox's value is in `infra/sandbox/conf/workload-gateway.conf`. Empty in production, where the advertised address is the real one. |
 
 Startup collects **every** missing or malformed key and refuses with all of
 them at once:
@@ -417,13 +421,16 @@ where TLS is terminated ahead of this process.
 ### How `status` is sent — read this before deploying
 
 `status` is a **free** route (spec §5): no payment to make, no claim to attach,
-no channel to open. What this process sends is the §6.1.2 packet body —
+no channel to open. What a member must RECEIVE is the §6.1.2 packet body —
 `{ "request": <request> }`, a plain JSON object nobody signed, carrying the
 member's grant as its `continuation` and the moment it was derived for as its
-content's `gateway_expires_at` — as a plain `POST` to the `status` path beside
-the member's `connector_url`. That is the body a provider reads once its
-connector has unsealed the envelope, and the path the wire fixtures record as
-`http_path`.
+content's `gateway_expires_at`. What this process SENDS is that body inside a
+**sealed ILP packet**, exactly as every other client of that route sends one:
+addressed `<ilp_address>.status`, posted to `connector_url`, sealed to
+`connector_seal_key` — the three fields the member's own Provider Profile
+publishes, so nothing is guessed and no path is invented beside a URL. The
+member's connector unseals the envelope and forwards plain HTTP to the
+provider app, which reads the body as plaintext JSON and no payment header.
 
 The **sealed messages a tenant sends this gateway** arrive the same way from
 the other side: the gateway's own connector unseals the envelope and forwards
@@ -432,22 +439,26 @@ and holds no sealing key of its own. A handover and a withdrawal are sealed to
 the one route that connector terminates, so both arrive at that one path, and
 the body's single key — `handover` or `withdrawal` — is what says which.
 
-**The limit of that, said plainly.** A connector that terminates
-`<addr>.status` expects a *sealed ILP packet* at its client edge, and answers
-nothing on a plain `POST`. So this carriage reaches a member whose free
-`status` route is served plainly — the provider app itself, or a connector
-configured to forward it — and **not** a member reachable only through a
-sealed client edge. The spec fixes the *request* and leaves the carriage to
-§5 and the member's connector (spec §12.4), so both are gateways; this one has
-only the first.
+**This gateway still holds no money.** `<addr>.status` is priced at `0`, and a
+free route needs no claim: the sender identity is generated fresh at startup,
+written to no store, never funded and holding no channel, and the client is
+built with `autoOpenChannel` off — so a paid route cannot be paid for here
+even by mistake. The key exists because a sealed packet needs an ephemeral
+sender, not because anything is bought with it. Nothing on any chain moves on
+this gateway's account, and a member's books show the same figure after a
+thousand `status` calls as before the first.
 
-The sealed carriage was not written here because it would **buy nothing** —
-the route is free — while pulling a payment client, a channel and a sealing
-key into a process whose whole point is that it holds none of them. Adding it
-changes exactly one file, [`src/status.mjs`](src/status.mjs), and would read
-`connector_seal_key` and `ilp_address` off the Profile that
-[`src/profiles.mjs`](src/profiles.mjs) already has: the request and the grant
-are identical either way. What changes is the carriage, not the request.
+**Why not a path beside `connector_url`.** An earlier round of this gateway
+replaced the `/ilp` suffix of `connector_url` with `/status` and sent plain
+HTTP there. That URL is nowhere in the directory: `connector_url` is the
+connector's own client edge (spec §4.1), and behind it the provider app's one
+listener carries `/status` *and* every `<listing>.v<n>.spawn` handler — so a
+deployment that exposed it would be putting a paid route on the public
+internet with the payment skipped. Real deployments therefore `404` it, and a
+`404` is not an answer about a lease. That is how every handover to a
+connector-fronted provider came to be answered `no_running_member`
+(TOON_Network#114). Spec §12.4 leaves the carriage to §5 and the member's
+connector; the only carriage the directory actually describes is this one.
 
 ## The error page
 
@@ -512,7 +523,7 @@ HTML page and the header all follow.
 | `src/profiles.mjs` | The Standby Set members' Profiles: connectors, Relay Sets, cadences. |
 | `src/resolve.mjs` | Resolution: ask every member, pick the running one, hold the target. |
 | `src/follow.mjs` | Following the workload: the Takeover watch, the settle window, the per-cadence re-ask. |
-| `src/status.mjs` | One `status` request: building it, where it is sent, reading the answer. |
+| `src/status.mjs` | One `status` request: building it, sealing it through the member's connector, reading the answer. |
 | `src/forward.mjs` | Forwarding: the headers, the answer, and WebSocket upgrades. |
 | `src/dial.mjs` | The one place a TCP connection is opened: `.anyone` through the proxy, anything else directly, and the `no_proxy` refusal. |
 | `src/rewrite.mjs` | `GATEWAY_DIAL_REWRITE`: an advertised address dialled somewhere else, in front of that seam. |
@@ -567,7 +578,7 @@ is driven, against a stub member that checks a presented grant the way spec
 | `tests/helpers/harness.mjs` | `startTestGateway`, `gateway.get(host)`, `gateway.handover(body)`, `gateway.withdraw(body)`, `gateway.publish(event)`, `admitAll`, `hostFor`, `untilServed`, `untilReason`, `until`. |
 | `tests/helpers/handover.mjs` | `gatewayHandover`, `gatewayWithdrawal` and the tenant's two HKDFs (`continuationFor`, `gatewaySub`, `grantFrom`), plus `asProvider` — a member that checks a presented grant the way a provider does. |
 | `tests/helpers/stub-relay.mjs` | A NIP-01 relay: holds Profiles and Takeover events; `publish` reaches subscriptions already open; replaces replaceable events as a relay does. |
-| `tests/helpers/stub-connector.mjs` | A provider's connector answering `POST /status` (spec §6.5). `answerWith` to change the answer, `goSilent` for a member that never replies, `requests` for what it was asked and what grant it presented. |
+| `tests/helpers/stub-connector.mjs` | A provider's connector, terminating a sealed packet for real and answering `status` behind it (spec §5, §6.5). `answerWith` to change the answer, `goSilent` for a member that never replies, `edgeAnswers` to stand in a hop that is not a connector at all, `requests` for what it was asked and what grant it presented. |
 | `tests/helpers/stub-workload.mjs` | The tenant's application: records method, URL, headers, body and who connected, and echoes over WebSocket. |
 | `tests/helpers/stub-socks.mjs` | A SOCKS5 proxy standing in for the `anon` daemon: routes a name to a stub, records every destination it was asked for and where each onward connection left from — so a test can say every `.anyone` connection went through it and nothing came any other way. |
 | `tests/helpers/events.mjs` | Signed `providerProfile`, `takeover`, `liveness`, and `CONSTANTS` — the test-only keys and clock every wire fixture was generated in. |

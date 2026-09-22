@@ -1,29 +1,27 @@
 // Where this gateway dials, when where a member SAYS it is differs from where
 // this gateway can reach it.
 //
-// A gateway dials two kinds of address it did not choose: a member's
+// A gateway reaches two kinds of address it did not choose: a member's
 // `connector_url`, out of its Profile (spec §4.1), and the `access.host` the
 // running member answered (§6.5) — and both name the member as ITS OWN clients
 // reach it. In a deployment those are the addresses. In a development sandbox
-// they are not: a provider on a compose network advertises
-// `provider-connector:3000`, which is a connector that terminates only sealed
-// packets (`src/status.mjs` says why that matters), and publishes its
-// workloads on the host's `127.0.0.1`, which from inside this process's own
-// container is this process. Its free `status` route is served plainly by the
-// provider app at another name, and the host is reachable at another name
-// again; nothing about the protocol changes, only where the socket goes.
+// the second is not: a provider publishes its workloads on the host's
+// `127.0.0.1`, which from inside this process's own container is this process,
+// and the host is reachable at another name again. Nothing about the protocol
+// changes, only where the socket goes.
 //
 // `GATEWAY_DIAL_REWRITE` is a JSON map from an advertised `host` or
-// `host:port` to the `host` or `host:port` this gateway dials instead. It is
-// applied at the ONE seam every outbound connection goes through
-// (`src/dial.mjs`), so the `status` leg and the forwarding leg cannot disagree
-// about it, and it is the counterpart of the directory publisher's
-// `TOON_ENDPOINT_REWRITE`: sandbox-only, because in production the advertised
-// address is the real one.
+// `host:port` to the `host` or `host:port` this gateway reaches instead. The
+// forwarding leg applies it at the one seam every dial goes through
+// (`src/dial.mjs`); the `status` leg applies the SAME table to the connector's
+// URL (`src/status.mjs`), because that leg's socket belongs to a connector
+// client rather than to this process. One table, so the two cannot disagree.
+// It is the counterpart of the directory publisher's `TOON_ENDPOINT_REWRITE`:
+// sandbox-only, because in production the advertised address is the real one.
 //
-// What it does NOT do: it rewrites no URL, no `Host` header and nothing a
-// member or a workload sees. The request is what §6.5 fixes; only the socket
-// moves.
+// What it does NOT do: it rewrites no `Host` header, no ILP destination, no
+// sealing key and nothing a member or a workload sees. The request is what
+// §6.5 fixes; only the socket moves.
 
 import { connect as netConnect } from 'node:net';
 

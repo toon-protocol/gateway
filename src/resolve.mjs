@@ -20,7 +20,11 @@
 // from a member that never held the lease — even though it arrived as an HTTP
 // response. Refusals are therefore counted with silence, because saying "no
 // member is running it" on the strength of a `bad_grant` would tell a tenant a
-// fact about its lease that this gateway never learned.
+// fact about its lease that this gateway never learned. AN ANSWER THAT IS NOT
+// A `status` DOCUMENT is counted with them for the same reason, and is the
+// stronger case: a 404 from a hop in front of the provider app, an HTML error
+// page, an empty body — the lease was never asked about at all, so the answer
+// cannot be about it (TOON_Network#114).
 //
 // WHAT M5-5 TAKES OVER FROM HERE. The current target per workload lives in
 // `targets` and nowhere else; `resolveNow` is the one way a resolution is
@@ -35,7 +39,7 @@ import { Agent } from 'node:http';
 import { refusalFor } from './dial.mjs';
 import { forwardRequest, forwardUpgrade } from './forward.mjs';
 import { unavailable } from './reasons.mjs';
-import { askStatus, statusRequest } from './status.mjs';
+import { statusDestination, statusRequest } from './status.mjs';
 
 /**
  * How long resolution waits for anything: a member's Profile off a relay, and
@@ -65,6 +69,7 @@ export function hostPortFor(access, httpPort) {
 /**
  * @param {{
  *   profiles: ReturnType<typeof import('./profiles.mjs').createProfiles>,
+ *   connectors: ReturnType<typeof import('./status.mjs').createConnectors>,
  *   dialer?: { connect: import('./dial.mjs').Dial },
  *   now?: () => number,
  *   log?: (line: string) => void,
@@ -73,6 +78,7 @@ export function hostPortFor(access, httpPort) {
  */
 export function createResolver({
   profiles,
+  connectors,
   dialer,
   now = () => Math.floor(Date.now() / 1000),
   log = () => {},
@@ -116,10 +122,11 @@ export function createResolver({
       };
     }
 
+    const destination = statusDestination(profile.ilpAddress);
     let answered;
     try {
-      answered = await askStatus({
-        connectorUrl: profile.connectorUrl,
+      answered = await connectors.ask({
+        profile,
         request: statusRequest({
           member,
           workloadId: grant.workloadId,
@@ -127,13 +134,11 @@ export function createResolver({
           gatewayExpiresAt: grant.expiresAt,
           now: now(),
         }),
-        timeoutMs,
-        connect,
       });
     } catch (e) {
       return {
         told: false,
-        why: `${profile.connectorUrl}: ${e instanceof Error ? e.message : String(e)}`,
+        why: `${destination} at ${profile.connectorUrl}: ${e instanceof Error ? e.message : String(e)}`,
         refusal: refusalFor(e, grant.workloadId),
       };
     }
@@ -145,7 +150,24 @@ export function createResolver({
     if (body?.error !== undefined) {
       return { told: false, why: `${profile.connectorUrl}: refused \`status\` (${body.error})` };
     }
-    if (body?.state !== 'running') return { told: true };
+    // AND NEITHER IS AN ANSWER THAT IS NOT A `status` AT ALL. A `status` says
+    // `state` or it says `error` (spec §5, §6.5); anything else — a 404 from
+    // something in front of the provider app, an HTML page, an empty body —
+    // is a fact about the CARRIAGE and says nothing whatever about the lease.
+    // Counting it as "answered, and not running" is what made every handover
+    // to a connector-fronted provider read `no_running_member`
+    // (TOON_Network#114), which sent the operator to the lease instead of to
+    // the hop that swallowed the request.
+    if (body === null || typeof body !== 'object' || body.state === undefined) {
+      return {
+        told: false,
+        why:
+          `${destination} at ${profile.connectorUrl}: answered HTTP ${answered.status} with ` +
+          `${answered.text === '' ? 'an empty body' : `\`${answered.text}\``}, which is not a ` +
+          '`status` document — so this gateway was not told anything about the lease',
+      };
+    }
+    if (body.state !== 'running') return { told: true };
     if (typeof body.access?.host !== 'string' || body.access.host === '') {
       log(`member ${member} answers \`running\` for ${grant.workloadId} with no \`access.host\``);
       return { told: true };
@@ -289,6 +311,7 @@ export function createResolver({
       targets.clear();
       inFlight.clear();
       agent.destroy();
+      connectors.close();
     },
   };
 }

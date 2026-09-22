@@ -8,7 +8,8 @@ import { describe, it } from 'node:test';
 import { request as httpRequest } from 'node:http';
 
 import { K_PROFILE, K_TAKEOVER } from '../src/kinds.mjs';
-import { CONSTANTS, providerProfile, takeover } from './helpers/events.mjs';
+import { createConnectors } from '../src/status.mjs';
+import { CONSTANTS, FIXTURE_SEAL_KEY, providerProfile, takeover } from './helpers/events.mjs';
 import { gatewayHandover, grantFrom } from './helpers/handover.mjs';
 import { admitAll, startTestGateway, until } from './helpers/harness.mjs';
 import { running, startStubConnector } from './helpers/stub-connector.mjs';
@@ -16,21 +17,26 @@ import { startStubWorkload } from './helpers/stub-workload.mjs';
 
 const WORKLOAD = 'aa'.repeat(32);
 
-const post = (url, body) =>
-  new Promise((resolve, reject) => {
-    const payload = JSON.stringify(body);
-    const target = new URL(url);
-    const req = httpRequest(
-      { host: target.hostname, port: target.port, path: target.pathname, method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } },
-      (res) => {
-        const chunks = [];
-        res.on('data', (c) => chunks.push(c));
-        res.on('end', () => resolve({ status: res.statusCode, json: JSON.parse(Buffer.concat(chunks).toString('utf8')) }));
-      },
-    );
-    req.on('error', reject);
-    req.end(payload);
-  });
+/**
+ * Ask a stub connector for `status` THE WAY THE GATEWAY DOES: the sealed
+ * packet, through `src/status.mjs`'s own carriage.
+ *
+ * There is deliberately no shortcut here. A helper that POSTed the body at
+ * some path would be testing a connector nobody deploys, which is precisely
+ * the bug this carriage replaced (TOON_Network#114): the only thing that gets
+ * an answer out of a real connector is a packet it can unseal.
+ */
+const profileOf = (connector) => ({
+  connectorUrl: connector.url,
+  ilpAddress: connector.ilpAddress,
+  connectorSealKey: FIXTURE_SEAL_KEY,
+});
+
+const asker = (t, { timeoutMs = 2000 } = {}) => {
+  const connectors = createConnectors({ timeoutMs });
+  t.after(() => connectors.close());
+  return (connector, request) => connectors.ask({ profile: profileOf(connector), request });
+};
 
 describe('the stub provider connector', () => {
   // Resolution starts one of these per Standby Set member and tells each what
@@ -53,14 +59,16 @@ describe('the stub provider connector', () => {
       continuation: grant,
       content: { workload_id: WORKLOAD, gateway_expires_at: expiresAt },
     };
-    const answered = await post(`${connector.url}/status`, { request });
+    const answered = await asker(t)(connector, request);
 
     assert.equal(answered.status, 200);
-    assert.equal(answered.json.state, 'running');
-    assert.equal(answered.json.access.ports[0].host_port, 41000);
+    assert.equal(answered.body.state, 'running');
+    assert.equal(answered.body.access.ports[0].host_port, 41000);
 
     const [recorded] = connector.requests;
-    assert.equal(recorded.path, '/status');
+    assert.equal(recorded.destination, connector.destination, 'addressed `<ilp_address>.status`');
+    assert.equal(recorded.target, '', 'and at the route\'s own handler, with no path beneath it');
+    assert.deepEqual(Object.keys(recorded.body), ['request'], 'the packet body of §6.1.2');
     assert.equal(recorded.continuation, grant, 'the grant rides in `continuation`');
     assert.equal(recorded.gatewayExpiresAt, expiresAt, 'naming the moment it was derived for');
     assert.equal(recorded.request.sig, undefined, 'and nobody signed it');
@@ -70,22 +78,24 @@ describe('the stub provider connector', () => {
     const connector = await startStubConnector({ pubkey: CONSTANTS.provider.public_key });
     t.after(() => connector.close());
 
-    const asking = { request: { content: {} } };
+    const ask = asker(t, { timeoutMs: 400 });
+    const asking = { content: {} };
     // Default: a workload this provider never leased.
-    assert.equal((await post(`${connector.url}/status`, asking)).json.error, 'unknown_workload');
+    assert.equal((await ask(connector, asking)).body.error, 'unknown_workload');
 
     connector.answerWith(() => ({ workload_id: WORKLOAD, role: 'standby', state: 'reserved', expires_at: CONSTANTS.now + 3600 }));
-    assert.equal((await post(`${connector.url}/status`, asking)).json.state, 'reserved');
+    assert.equal((await ask(connector, asking)).body.state, 'reserved');
+
+    // Something that is NOT this connector in front of it — an nginx that
+    // 404s the client edge. The carriage fails; nothing is learned about the
+    // lease, and `src/resolve.mjs` counts that with silence.
+    connector.edgeAnswers(() => ({ status: 404, body: '' }));
+    await assert.rejects(ask(connector, asking));
+    connector.edgeAnswers(undefined);
 
     // A member that connects and never replies: `member_unreachable`.
     connector.goSilent();
-    await assert.rejects(
-      Promise.race([
-        post(`${connector.url}/status`, asking),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('no answer')), 100)),
-      ]),
-      /no answer/,
-    );
+    await assert.rejects(ask(connector, asking), /within 400 ms/);
   });
 });
 

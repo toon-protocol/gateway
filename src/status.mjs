@@ -17,33 +17,47 @@
 // the members the handover names and nowhere else: never into a log line,
 // never into an error message, and never into an answer this gateway writes.
 //
-// CARRIAGE — a decision worth knowing about. `status` is a FREE route (spec
-// §5), so there is no payment to make and no claim to attach, and this gateway
-// holds no channel, no mnemonic and no wallet: it must never call a paid
-// route. What it sends is therefore the §6.1.2 packet body — `{ "request":
-// <request> }` — over plain HTTP to the member's connector at the `status`
-// path, which is the body a provider reads after its connector has unsealed
-// the envelope and the path the wire fixtures record as `http_path`.
+// CARRIAGE — the sealed packet, exactly as every other client of that route
+// sends one (spec §5, §6.1.2; ADR 0011, ADR 0022). What a member must RECEIVE
+// is `{ "request": <request> }`; how it gets there is its connector's
+// question, and the Provider Profile answers it in three fields and no
+// guesswork: the packet is addressed `<ilp_address>.status`, sent to
+// `connector_url`, and sealed to `connector_seal_key`. The connector unseals
+// it and forwards plain HTTP to the provider app, which reads the body as
+// plaintext JSON and no payment header (§2).
 //
-// A deployment whose members sit behind a connector that terminates the sealed
-// ILP envelope needs that carriage instead, and ONLY this module changes: the
-// request and the grant are identical either way — what changes is the
-// carriage, not the request. That swap is not made here because it would buy
-// nothing (the route is free), would need the connector's self-description and
-// sealing key, and would put a payment client into a process whose whole point
-// is that it holds none.
+// WHY NOT A PATH BESIDE `connector_url`. An earlier round of this module
+// replaced the `/ilp` suffix of `connector_url` with `/status` and sent plain
+// HTTP there. That URL is nowhere in the directory: `connector_url` is the
+// connector's own client edge (§4.1), and the provider app's listener carries
+// `/status` AND every `<listing>.v<n>.spawn` handler, so a deployment that
+// published it would be putting a paid route on the public internet with the
+// payment skipped. Real deployments therefore 404 it, and a 404 is not an
+// answer about a lease — which is how every handover to a connector-fronted
+// provider came to be answered `no_running_member` (TOON_Network#114).
+//
+// THIS GATEWAY STILL HOLDS NO MONEY. `status` is priced at 0 (§5), and a free
+// route needs no claim: the identity below is generated fresh at startup, is
+// written to no store and holds no channel, and `autoOpenChannel` is off — so
+// a paid route cannot be paid for here even by mistake, which is a stronger
+// statement than "this gateway is careful". The key exists because a sealed
+// packet needs an ephemeral sender, not because anything is bought with it.
 
 import { randomBytes } from 'node:crypto';
-import { request as httpRequest } from 'node:http';
-import { request as httpsRequest } from 'node:https';
 
-import { connectionOptions } from './dial.mjs';
+import { generateRandomIdentity } from '@toon-protocol/client';
 
-/** Where a connector forwards `<addr>.status` (spec §5; the provider's `STATUS_PATH`). */
-export const STATUS_PATH = '/status';
+import { isAnyoneHost, NoProxyError } from './dial.mjs';
+import { rewriteTarget } from './rewrite.mjs';
+
+/** The route a member's free `status` is terminated at (spec §5). */
+export const STATUS_ROUTE = 'status';
 
 /** The request window of §6.1: a provider refuses one older than its `expiration`. */
 export const REQUEST_TTL_S = 60;
+
+/** The `status` route of one member: `<ilp_address>.status` (spec §5). */
+export const statusDestination = (ilpAddress) => `${ilpAddress}.${STATUS_ROUTE}`;
 
 /**
  * The `status` a gateway sends one member, presenting its Gateway Grant.
@@ -64,90 +78,197 @@ export function statusRequest({ member, workloadId, grant, gatewayExpiresAt, now
   };
 }
 
+/** A pinned `connector_seal_key` as the bytes the connector client seals to. */
+const sealKeyBytes = (hex) => Uint8Array.from(Buffer.from(hex.replace(/^0x/i, ''), 'hex'));
+
+/** The first few hundred characters of whatever a member sent, for a log line. */
+const snippet = (text) => {
+  const flat = String(text ?? '').replace(/\s+/g, ' ').trim();
+  return flat.length > 120 ? `${flat.slice(0, 117)}...` : flat;
+};
+
 /**
- * The URL a member's `status` is sent to, from its Profile's `connector_url`.
+ * Where a member's connector is DIALLED, which is where it says it is unless
+ * this gateway has been told otherwise (`src/rewrite.mjs`).
  *
- * `connector_url` is a location hint (spec §4.1) and conventionally ends in
- * `/ilp` — the connector's own client edge. The route beside it is where
- * `<addr>.status` lands, so the `/ilp` suffix is replaced rather than appended
- * to, and a connector published without one is simply asked at its root.
+ * The rewrite is the same table the forwarding leg uses, applied to the URL
+ * rather than to the socket, because this leg's socket belongs to the
+ * connector client. It moves where the bytes go and nothing else: the
+ * destination addressed, the key sealed to and the request itself are all
+ * untouched.
  */
-export function statusUrl(connectorUrl) {
+export function dialledConnector(connectorUrl, rewrites) {
   const url = new URL(connectorUrl);
-  url.search = '';
-  url.hash = '';
-  const path = url.pathname.replace(/\/+$/, '');
-  url.pathname = (path.toLowerCase().endsWith('/ilp') ? path.slice(0, -4) : path) + STATUS_PATH;
-  return url;
+  const secure = url.protocol === 'https:';
+  const port = Number(url.port || (secure ? 443 : 80));
+  const to = rewriteTarget(rewrites, url.hostname, port);
+  if (to.host === url.hostname && to.port === port) return connectorUrl;
+  url.hostname = to.host;
+  url.port = String(to.port);
+  return url.toString();
 }
 
 /**
- * Send one `status` and read the answer.
+ * The connector clients this gateway sends `status` through.
  *
- * Resolves with `{ status, body }` — the provider's refusal shape included,
- * because a refusal is an answer: a member that says `bad_grant` has been
- * reached and is simply not the target. It REJECTS only when the member could
- * not be reached or did not answer in time, which is the difference between
- * "no member is running it" and "this member cannot be reached".
+ * ONE CLIENT PER CONNECTOR, kept: building one reads the connector's
+ * self-description (`GET /ilp`), and a gateway that rebuilt it per request
+ * would ask a member twice for every `status` and hold a cache of nothing.
+ * `close()` ends them all, so a shutdown leaves no socket behind.
+ *
+ * The identity is generated ONCE for this process and shared by every client:
+ * it is not an account, nothing is settled with it, and it exists only so a
+ * gift-wrapped packet has a sender. Both chains' keys are generated because
+ * which chain a member's connector settles on is the member's business, and a
+ * client that holds no key for it refuses to be built at all.
  *
  * @param {{
- *   connectorUrl: string, request: object, timeoutMs: number,
- *   connect?: import('./dial.mjs').Dial,
- * }} options
- * @returns {Promise<{ status: number | undefined, body: any }>}
+ *   socksProxy?: string,
+ *   rewrites?: Map<string, { host: string, port: number | undefined }>,
+ *   timeoutMs: number,
+ *   log?: (line: string) => void,
+ *   createClient?: (config: object) => Promise<any>,
+ * }} deps
  */
-export function askStatus({ connectorUrl, request, timeoutMs, connect }) {
-  const url = statusUrl(connectorUrl);
-  const secure = url.protocol === 'https:';
-  const send = secure ? httpsRequest : httpRequest;
-  const payload = JSON.stringify({ request });
-  const port = Number(url.port || (secure ? 443 : 80));
+export function createConnectors({
+  socksProxy,
+  rewrites = new Map(),
+  timeoutMs,
+  log = () => {},
+  createClient,
+}) {
+  /** @type {Map<string, Promise<any>>} connector URL -> its client */
+  const clients = new Map();
+  /** Generated on first use, so a gateway that never resolves anything makes no key. */
+  let identity;
 
-  return new Promise((resolve, reject) => {
-    // Never pooled: a `status` is asked rarely, and a connection left open in
-    // a pool would outlive the gateway's own shutdown.
-    let dialled;
-    try {
-      dialled = connectionOptions(connect, url.hostname, port, undefined, { secure });
-    } catch (e) {
-      reject(e);
-      return;
-    }
+  const open = async (connectorUrl) => {
+    const { ToonClient } = await import('@toon-protocol/client');
+    identity ??= generateRandomIdentity();
+    const dialled = dialledConnector(connectorUrl, rewrites);
+    if (dialled !== connectorUrl) log(`asking ${connectorUrl} at ${dialled} (GATEWAY_DIAL_REWRITE)`);
+    const config = {
+      connector: dialled,
+      evmPrivateKey: identity.evm.privateKey,
+      solanaSecretKey: identity.solana.secretKey,
+      // `status` is free, so there is nothing to pay and nothing to open a
+      // channel for. Off, rather than merely unused: a bug that addressed a
+      // paid route here fails loudly instead of quietly buying something.
+      autoOpenChannel: false,
+      deposit: 0n,
+      // One-shot and stateless, which is what a `status` is.
+      transport: /** @type {'http'} */ ('http'),
+      timeoutMs,
+      // THE PROXY IS FOR `.anyone` HOSTS AND NOTHING ELSE (spec §12.8): a
+      // member at a hidden address is reached through the anon client, and
+      // any other member is dialled directly — so a Standby Set mixing the
+      // two needs no configuration beyond the proxy, and a public member is
+      // not quietly routed through a circuit it never asked for. The client
+      // refuses the pairing outright, which is the same rule said twice.
+      ...(socksProxy !== undefined && isAnyoneHost(new URL(dialled).hostname) ? { socksProxy } : {}),
+    };
+    return createClient === undefined ? ToonClient.create(config) : createClient(config);
+  };
 
-    const outbound = send(
-      {
-        host: url.hostname,
-        port,
-        path: url.pathname,
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'content-length': String(Buffer.byteLength(payload)),
-          accept: 'application/json',
-        },
-        ...dialled,
-      },
-      (answer) => {
-        const chunks = [];
-        answer.on('data', (chunk) => chunks.push(chunk));
-        answer.on('end', () => {
-          const text = Buffer.concat(chunks).toString('utf8');
-          let body = null;
-          try {
-            body = JSON.parse(text || 'null');
-          } catch {
-            reject(new Error(`answered ${answer.statusCode} with something that is not JSON`));
-            return;
-          }
-          resolve({ status: answer.statusCode, body });
-        });
-      },
-    );
-
-    outbound.setTimeout(timeoutMs, () => {
-      outbound.destroy(new Error(`did not answer \`status\` within ${timeoutMs} ms`));
+  const clientFor = (connectorUrl) => {
+    const held = clients.get(connectorUrl);
+    if (held !== undefined) return held;
+    // A failure to build is not cached: a connector that was down when this
+    // gateway first asked must be askable again on the next request.
+    const opening = open(connectorUrl).catch((e) => {
+      clients.delete(connectorUrl);
+      throw e;
     });
-    outbound.on('error', reject);
-    outbound.end(payload);
-  });
+    clients.set(connectorUrl, opening);
+    return opening;
+  };
+
+  /**
+   * One ask, with no deadline of its own: what the race below is racing.
+   *
+   * @param {{ profile: { connectorUrl: string, ilpAddress: string, connectorSealKey: string }, request: object }} options
+   * @returns {Promise<{ status: number | undefined, body: any, text: string }>}
+   */
+  const asked = async ({ profile, request }) => {
+    const url = new URL(profile.connectorUrl);
+    // An `.anyone` connector is never resolved or dialled directly (spec
+    // §12.8): with no proxy, nothing is tried and the tenant is told so by
+    // name. The client would refuse it too, but this refusal is the one the
+    // reason vocabulary already has a word for.
+    if (isAnyoneHost(url.hostname) && socksProxy === undefined) {
+      throw new NoProxyError(url.hostname, Number(url.port || (url.protocol === 'https:' ? 443 : 80)));
+    }
+    const client = await clientFor(profile.connectorUrl);
+    const destination = statusDestination(profile.ilpAddress);
+    const sent = await client.send(
+      destination,
+      { body: { request } },
+      { sealTo: sealKeyBytes(profile.connectorSealKey), timeoutMs },
+    );
+    // A REJECT is the CARRIAGE refusing, not the provider answering: no
+    // route, a price this gateway will not pay, a seal the connector could
+    // not open. Nothing was learned about the lease.
+    if (!sent.fulfilled) {
+      throw new Error(
+        `${destination} was refused by ${sent.refusedBy ?? 'the path'}: ${sent.code} ${sent.message}`,
+      );
+    }
+    const text = sent.text();
+    let body;
+    try {
+      body = JSON.parse(text || 'null') ?? undefined;
+    } catch {
+      body = undefined;
+    }
+    return { status: sent.status, body, text: snippet(text) };
+  };
+
+  return {
+    /**
+     * Send one `status` to one member, and read the answer.
+     *
+     * Resolves with `{ status, body, text }` — the provider's refusal shape
+     * included, because a refusal is an answer: a member that says `bad_grant`
+     * has been reached and is simply not the target. `body` is the JSON the
+     * member sent, or `undefined` when what came back was not JSON at all;
+     * `text` is what it sent instead, for a log line.
+     *
+     * It REJECTS only when the member could not be reached, was refused
+     * carriage, or did not answer in time — which is the difference between
+     * "no member is running it" and "this member cannot be reached".
+     *
+     * @param {{ profile: { connectorUrl: string, ilpAddress: string, connectorSealKey: string }, request: object }} options
+     * @returns {Promise<{ status: number | undefined, body: any, text: string }>}
+     */
+    ask({ profile, request }) {
+      // THE OPERATOR'S TIMEOUT BOUNDS THE WHOLE ASK, not one socket inside
+      // it. A connector client reads a self-description, may re-price a route
+      // and retries a lost packet of its own accord; all of that is between a
+      // tenant and its first byte, and `GATEWAY_RESOLVE_TIMEOUT_MS` is what an
+      // operator set to say how long that may take. The attempt underneath is
+      // left to finish or fail on its own — its rejection is swallowed rather
+      // than left to crash a process that has already given up on it.
+      let timer;
+      const attempt = asked({ profile, request });
+      attempt.catch(() => {});
+      return Promise.race([
+        attempt,
+        new Promise((_resolve, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`did not answer \`status\` within ${timeoutMs} ms`)),
+            timeoutMs,
+          );
+          timer.unref?.();
+        }),
+      ]).finally(() => clearTimeout(timer));
+    },
+
+    close() {
+      const open = [...clients.values()];
+      clients.clear();
+      for (const opening of open) {
+        opening.then((client) => client.close?.()).catch(() => {});
+      }
+    },
+  };
 }

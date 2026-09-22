@@ -25,6 +25,7 @@ import { createRelayPool } from './relays.mjs';
 import { createResolver } from './resolve.mjs';
 import { withDialRewrites } from './rewrite.mjs';
 import { createRequestHandler } from './serve.mjs';
+import { createConnectors } from './status.mjs';
 import { createWithdrawals } from './withdraw.mjs';
 
 const listen = (server, port, address) =>
@@ -69,6 +70,15 @@ export async function startGateway({
   const profiles = createProfiles({ pool: relays, relays: config.relays, log });
   const resolver = createResolver({
     profiles,
+    // How a member is ASKED (spec §5, §6.1.2): the sealed packet, through the
+    // member's own connector, at the free `status` route its Profile names.
+    connectors: createConnectors({
+      socksProxy: config.socksProxy,
+      rewrites: config.dialRewrites,
+      timeoutMs: config.resolveTimeoutMs,
+      log,
+    }),
+    // How a WORKLOAD is dialled once a member has said where it is.
     dialer: withDialRewrites(createDialer({ socksProxy: config.socksProxy }), config.dialRewrites),
     now,
     log,
