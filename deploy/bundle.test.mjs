@@ -49,10 +49,21 @@ const CONNECTOR_PIN = 'ghcr.io/toon-protocol/connector:rust-2026.09.11.1';
 // `rust-main`, and never the retired `rust-release` pointer.
 const IMMUTABLE_PIN = /:(rust-sha-[0-9a-f]{7,40}|rust-\d{4}\.\d{2}\.\d{2}\.\d+)$/;
 
+/**
+ * A literal, escaped for use inside a RegExp.
+ *
+ * The whole metacharacter class, including the backslash. Escaping only `/`
+ * and `.` — the characters these particular constants happen to contain —
+ * leaves a `\` in a future constant to escape whatever follows it, which is
+ * the `js/incomplete-sanitization` shape. Nothing here is attacker-controlled,
+ * but a half-escape is cheaper to not write than to explain.
+ */
+const rx = (literal) => literal.replace(/[.*+?^${}()|[\]\\/-]/g, '\\$&');
+
 describe('the terminated route', () => {
   it('is the one sealed handover route, free, at the door the gateway serves', () => {
     assert.match(connectorToml, new RegExp(`prefix\\s*=\\s*"${HANDOVER_ROUTE}"`));
-    assert.match(connectorToml, new RegExp(`handler_url\\s*=\\s*"${HANDOVER_HANDLER.replace(/[/.]/g, '\\$&')}"`));
+    assert.match(connectorToml, new RegExp(`handler_url\\s*=\\s*"${rx(HANDOVER_HANDLER)}"`));
     // `price = 0` is WRITTEN, never omitted: a terminated route is never
     // silently free, and the parser requires a price either way.
     assert.match(connectorToml, /price\s*=\s*0\b/);
@@ -145,7 +156,7 @@ describe('state', () => {
 describe('the connector pin', () => {
   it('is an immutable build', () => {
     assert.match(CONNECTOR_PIN, IMMUTABLE_PIN);
-    assert.match(compose, new RegExp(`image:\\s*${CONNECTOR_PIN.replace(/[/.]/g, '\\$&')}\\s*$`, 'm'));
+    assert.match(compose, new RegExp(`image:\\s*${rx(CONNECTOR_PIN)}\\s*$`, 'm'));
   });
 
   it('is written in docker-compose.yml and nowhere else in the bundle', () => {
