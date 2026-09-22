@@ -240,10 +240,10 @@ journalctl -u toon-auto-apply.service -n 50
 systemctl start toon-auto-apply.service   # apply now, rather than waiting
 ```
 
-`TRACK_BRANCH` in `.env` names the branch. It is a variable because this
-repository's default branch is not `main` today, and a box silently following a
-branch that does not exist would report success every five minutes while
-sitting on whatever it was last deployed with.
+`TRACK_BRANCH` in `.env` names the branch, defaulting to `main`. It stays a
+variable so a box can be parked on a branch deliberately, and because a box
+silently following a branch that does not exist would report success every five
+minutes while sitting on whatever it was last deployed with.
 
 ## Bumping the connector pin
 

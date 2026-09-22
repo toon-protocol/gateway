@@ -24,9 +24,10 @@
 #    gateway is built from the checkout this script just fast-forwarded. A
 #    build with nothing changed is a cache hit and costs seconds.
 # 2. IT TRACKS A NAMED BRANCH. `TRACK_BRANCH` in .env, defaulting to `main`.
-#    This repository's default branch is not `main` today, and a box that
-#    silently followed a branch that does not exist would sit on whatever it
-#    was last deployed with while reporting success every five minutes.
+#    Named rather than assumed, so a box can be parked on a branch on purpose,
+#    and because a box that silently followed a branch that does not exist
+#    would sit on whatever it was last deployed with while reporting success
+#    every five minutes.
 set -euo pipefail
 
 REPO_DIR=$(cd "$(dirname "$0")/.." && pwd)
