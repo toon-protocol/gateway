@@ -1,0 +1,205 @@
+# =============================================================================
+# The TOON Workload Gateway box — one host, four containers
+# =============================================================================
+#   nginx       the public TLS edge (the only thing bound to a public port)
+#   certbot     issues and renews ONE wildcard certificate, over DNS-01
+#   gateway     this repository, built from the checkout the box follows
+#   connector   the gateway's own payment proxy (ADR 0013): it unseals a
+#               Gateway Handover and forwards it to the gateway's door
+#
+#   tenant ──seal──▶ nginx :443 ──▶ connector :4000 ──▶ gateway :8081 /handover
+#   visitor ───────▶ nginx :443 ──▶ gateway :8443 ─────▶ the workload
+#
+# Bring it up:  ./bootstrap.sh
+# See ./README.md — nothing here works without the key files and .env it lists.
+#
+# ── Why there is no Watchtower here ──────────────────────────────────────────
+# The store and relay boxes run Watchtower because their app is a published
+# image on a moving `:release` tag. This repository publishes no image yet, so
+# the `gateway` service below is BUILT FROM THE CHECKOUT — and the checkout is
+# what `auto-apply.sh` fast-forwards every five minutes. The update path is
+# therefore the git one, for the app and the config together, and a Watchtower
+# here would have nothing to follow. The connector is an immutable pin, as it
+# is on every other box, so it would have nothing to follow either.
+# README § "How updates arrive".
+# =============================================================================
+
+name: gateway
+
+services:
+  # ── The Workload Gateway ───────────────────────────────────────────────────
+  # No `ports:` at all. nginx is what faces the internet; the door (8081) in
+  # particular must NEVER be published — reaching it directly would be a way
+  # to tell the gateway what to serve without paying its connector a packet,
+  # which is the one thing the connector exists to prevent.
+  gateway:
+    build:
+      # The repository this bundle lives in. `auto-apply.sh` rebuilds it when
+      # main moves; a `docker compose build` is a no-op when nothing changed.
+      context: ..
+    environment:
+      # Every workload is served at `<label>.${GATEWAY_DOMAIN}`, so a wildcard
+      # A-record and a wildcard certificate both point here. README § DNS.
+      GATEWAY_DOMAIN: ${GATEWAY_DOMAIN:?set GATEWAY_DOMAIN in .env}
+      # Read-only, unauthenticated relay reads: the members' Provider Profiles
+      # and the Takeovers that move a workload between them. No key, no write,
+      # no account.
+      GATEWAY_RELAYS: ${GATEWAY_RELAYS:?set GATEWAY_RELAYS in .env}
+      # The door. Its own listener, never a path on the listeners that front
+      # workloads — a reserved path would carve a hole out of every tenant's
+      # URL space. Only `connector` reaches it, over the compose network.
+      GATEWAY_HANDOVER_PORT: '8081'
+      # ── Two listeners, and why ──────────────────────────────────────────
+      # 8443 is what nginx proxies to, and it is TLS even though that hop
+      # never leaves this host's compose network. The gateway computes the
+      # `X-Forwarded-Proto` it hands a workload from ITS OWN listener, not
+      # from a header: served over the plain listener it would tell every
+      # workload `http` while the tenant was on `https`, and a workload that
+      # builds absolute URLs would send visitors to a URL that redirects back
+      # to itself. So the internal hop carries a long-lived self-signed
+      # certificate (bootstrap.sh writes it; it is never presented to anyone
+      # outside this network) and the public certificate stays with nginx,
+      # where certbot can renew it without restarting this process.
+      #
+      # That last point is not cosmetic. Every grant this gateway holds is in
+      # memory: a restart drops them all and each tenant has to re-seal its
+      # handover. A certificate renewal must not be able to cause that.
+      GATEWAY_HTTPS_PORT: '8443'
+      GATEWAY_TLS_CERT: /etc/workload-gateway/tls/internal.crt
+      GATEWAY_TLS_KEY: /etc/workload-gateway/tls/internal.key
+      # 8080 is the plain listener, and it exists for the healthcheck below
+      # and for nothing else: it is in no `ports:` row and in no nginx
+      # upstream. See the healthcheck's comment for why a probe needs it.
+      GATEWAY_HTTP_PORT: '8080'
+      # How many admission rounds any one provider may be asked for in a
+      # minute: anyone can seal a handover, so this bounds the `status`
+      # traffic a stranger's packets can make this gateway send.
+      GATEWAY_ADMIT_PER_MINUTE: ${GATEWAY_ADMIT_PER_MINUTE:-6}
+      # The buyer-side SOCKS proxy for `.anyone` members (spec §10, ADR 0008).
+      # Empty unless this box runs an anon daemon; a Hidden Provider's
+      # workload is then `no_proxy` rather than silently dialled in the clear.
+      TOON_SOCKS_PROXY: ${TOON_SOCKS_PROXY:-}
+      # GATEWAY_DIAL_REWRITE is deliberately ABSENT. It is the sandbox's one
+      # line that would be wrong in a deployment: here a member is dialled
+      # where its own Profile says it is.
+    volumes:
+      - ./tls:/etc/workload-gateway/tls:ro
+    expose: ['8080', '8443', '8081']
+    healthcheck:
+      # The gateway answers a hostname it holds no grant for — `127.0.0.1` is
+      # one — with its own 503 and dials nothing: a liveness probe that
+      # touches no provider. It runs against the PLAIN listener because
+      # node:22-slim has neither curl nor wget, so the probe is a `node -e`
+      # fetch, and a fetch at the 8443 listener would fail on the self-signed
+      # certificate rather than on the gateway being down.
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:8080/').then((r) => process.exit(r.status === 503 && r.headers.get('toon-gateway-reason') === 'no_grant' ? 0 : 1), () => process.exit(1))",
+        ]
+      # 15s, not the 10s the connector uses: the probe is a node process, and
+      # each probe is a line in the gateway's request log.
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 10s
+    restart: unless-stopped
+
+  # ── The gateway's own payment proxy ────────────────────────────────────────
+  # Published on the LOOPBACK only. nginx is what faces the internet; binding
+  # this to 0.0.0.0 would put the sealed edge on the public internet past ufw
+  # (docker's iptables rules run ahead of ufw — see README § "ports: bypasses
+  # ufw").
+  connector:
+    # An IMMUTABLE pin. Nothing moves the fleet's old promotion pointer any
+    # more (connector ADR 0068 — a node repository pins the connector it
+    # runs), so the connector moves by a reviewed commit here: this tag and
+    # the matching literal in deploy/bundle.test.mjs, together.
+    # README § "Bumping the connector pin".
+    image: ghcr.io/toon-protocol/connector:rust-2026.09.11.1
+    command: ['/app/config/connector.toml']
+    volumes:
+      - ./connector.toml:/app/config/connector.toml:ro
+      # The SEALING KEY. This is the gateway's identity as far as a tenant is
+      # concerned: the handover is sealed to the public half of this file, and
+      # the tenant pins it from the `GET /ilp` this node answers. Changing it
+      # makes this a different gateway.
+      - ./signer.key:/app/data/signer.key:ro
+      # Settlement, even though the handover route is free: a connector client
+      # opens its channel against the settlement key the payee's `GET /ilp`
+      # reports, and a node with no settlement table has nothing to open one
+      # against. Both keys must also hold a little native gas or the node
+      # refuses to boot — README § "The three funded identities".
+      - ./settlement.key:/app/data/settlement.key:ro
+      - ./settlement-solana.key:/app/data/settlement-solana.key:ro
+      - ./operator-bearer.token:/app/data/operator-bearer.token:ro
+      - ./operator-write.keys:/app/data/operator-write.keys:ro
+      # The claim watermark. A NAMED volume, never a bind: the image ships
+      # /app/state owned by uid 10001, which a fresh named volume inherits on
+      # first mount and a bind mount does not.
+      - connector_state:/app/state
+    ports:
+      - '127.0.0.1:4000:4000'
+    healthcheck:
+      # The connector has no /health route. GET /ilp/identity is
+      # unauthenticated and answers 200 only once the process is serving AND
+      # has read its signer key file — `docker ps` showing "Up" proves
+      # neither. 127.0.0.1, never localhost: the listener is IPv4-only, but
+      # "localhost" in a container can resolve to ::1, where nothing listens.
+      test: ['CMD-SHELL', 'wget -q --spider http://127.0.0.1:4000/ilp/identity || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    depends_on:
+      gateway:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── The TLS edge ───────────────────────────────────────────────────────────
+  # The reload loop is load-bearing here in a way it is not on the other
+  # boxes: this box's certificate is renewed by DNS-01 while nginx keeps
+  # running, and nginx holds a certificate open for the process lifetime. Six
+  # hours is well inside Let's Encrypt's 30-day renewal window.
+  nginx:
+    image: nginx:alpine
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - certbot_conf:/etc/letsencrypt:ro
+      - certbot_www:/var/www/certbot:ro
+    command: >
+      sh -c "while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g 'daemon off;'"
+    restart: unless-stopped
+
+  # ── The certificate ────────────────────────────────────────────────────────
+  # DNS-01, not HTTP-01, and this is the first bundle in the fleet that needs
+  # it: the certificate covers `*.${GATEWAY_DOMAIN}`, and Let's Encrypt issues
+  # a wildcard over DNS-01 only. The hooks under ./certbot write and delete
+  # the `_acme-challenge` TXT record through the Porkbun API with the two
+  # credentials below; they are plain python3, which the certbot image already
+  # has, so this stays the stock image with no plugin baked in.
+  certbot:
+    image: certbot/certbot
+    environment:
+      PORKBUN_API_KEY: ${PORKBUN_API_KEY:?set PORKBUN_API_KEY in .env}
+      PORKBUN_SECRET_KEY: ${PORKBUN_SECRET_KEY:?set PORKBUN_SECRET_KEY in .env}
+      PORKBUN_ZONE: ${PORKBUN_ZONE:?set PORKBUN_ZONE in .env}
+    volumes:
+      - certbot_conf:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+      - ./certbot:/opt/hooks:ro
+    entrypoint: >
+      sh -c "trap exit TERM; while :; do certbot renew --quiet; sleep 12h & wait $${!}; done"
+    restart: unless-stopped
+
+volumes:
+  # The claim watermark. Back this up; losing it hands every payer their
+  # already-spent claims back as free service.
+  connector_state:
+  certbot_conf:
+  certbot_www:

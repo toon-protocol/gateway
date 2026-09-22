@@ -1,0 +1,267 @@
+// The guard on the deploy bundle.
+//
+// It reads the REAL files, not fixtures: a fixture would keep passing while
+// the shipped artifact regressed. Every expected value is a literal declared
+// here and never read back out of the file under test, so a reverted fix fails
+// this suite instead of quietly agreeing with itself.
+//
+// It has no dependencies. This repository ships a parser for neither TOML nor
+// YAML and does not need one for this: the assertions below are about exact
+// lines a human wrote, and a regex over the real bytes catches the same
+// regressions a parse would while keeping the dependency tree at zero.
+//
+// What it holds still, and why:
+//   * the one terminated route, its handler and its price — the handler path
+//     is where a handover lands, and nothing else decides it;
+//   * the settlement deployment, because a node that settles against the
+//     wrong token cannot be paid and says so only at boot;
+//   * `[node]`, because a node that cannot say where it is cannot be reached;
+//   * the connector pin, in exactly one place, because two copies drift;
+//   * the exposure invariants: the door is never published, the connector's
+//     edge is loopback-only, and only the TLS front faces the internet;
+//   * `GATEWAY_DIAL_REWRITE`, which is the sandbox's one line that would be
+//     wrong here;
+//   * healthchecks dialling 127.0.0.1, because "localhost" in a container can
+//     resolve to ::1, where an IPv4-bound listener never answers.
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const read = (name) => readFileSync(join(HERE, name), 'utf8');
+
+const compose = read('docker-compose.yml');
+const connectorToml = read('connector.toml.template');
+const nginxConf = read('nginx/node.conf.template');
+const envExample = read('.env.example');
+const gitignore = read('.gitignore');
+const renderSh = read('render.sh');
+
+// ── The literals this bundle is ───────────────────────────────────────────
+const ILP_ADDRESS = 'g.toon.workload-gateway';
+const HANDOVER_ROUTE = 'g.toon.workload-gateway.handover';
+const HANDOVER_PORT = '8081';
+const HANDOVER_HANDLER = 'http://gateway:8081/handover';
+const CONNECTOR_PIN = 'ghcr.io/toon-protocol/connector:rust-2026.09.11.1';
+// An immutable build: a dated release alias or an exact commit. Never
+// `rust-main`, and never the retired `rust-release` pointer.
+const IMMUTABLE_PIN = /:(rust-sha-[0-9a-f]{7,40}|rust-\d{4}\.\d{2}\.\d{2}\.\d+)$/;
+
+describe('the terminated route', () => {
+  it('is the one sealed handover route, free, at the door the gateway serves', () => {
+    assert.match(connectorToml, new RegExp(`prefix\\s*=\\s*"${HANDOVER_ROUTE}"`));
+    assert.match(connectorToml, new RegExp(`handler_url\\s*=\\s*"${HANDOVER_HANDLER.replace(/[/.]/g, '\\$&')}"`));
+    // `price = 0` is WRITTEN, never omitted: a terminated route is never
+    // silently free, and the parser requires a price either way.
+    assert.match(connectorToml, /price\s*=\s*0\b/);
+  });
+
+  it('terminates nothing else', () => {
+    const prefixes = [...connectorToml.matchAll(/^\s*prefix\s*=\s*"([^"]+)"/gm)].map((m) => m[1]);
+    assert.deepEqual(prefixes, [HANDOVER_ROUTE]);
+  });
+
+  it('forwards to the port the gateway is told to open the door on', () => {
+    assert.match(compose, new RegExp(`GATEWAY_HANDOVER_PORT:\\s*'${HANDOVER_PORT}'`));
+  });
+});
+
+describe('[node] — what this box says it is', () => {
+  it('claims exactly its own address', () => {
+    assert.match(connectorToml, new RegExp(`addresses\\s*=\\s*\\["${ILP_ADDRESS}"\\]`));
+  });
+
+  it('advertises public, TLS endpoints, rendered from one variable', () => {
+    assert.match(connectorToml, /http_endpoint\s*=\s*"https:\/\/\$\{EDGE_HOST\}\/ilp"/);
+    assert.match(connectorToml, /btp_endpoint\s*=\s*"wss:\/\/\$\{EDGE_HOST\}\/ilp\/btp"/);
+  });
+});
+
+describe('settlement', () => {
+  it('settles on Base Sepolia through the registry, against the 6dp mock USDC', () => {
+    assert.match(connectorToml, /contract_address\s*=\s*"0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5"/);
+    assert.match(connectorToml, /token_address\s*=\s*"0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"/);
+  });
+
+  it('settles on Solana devnet against the deployed payment-channel program', () => {
+    assert.match(connectorToml, /program_id\s*=\s*"2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip"/);
+    assert.match(connectorToml, /token_address\s*=\s*"34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU"/);
+  });
+
+  it('states 6 decimals on both legs, which the connector checks against the chain', () => {
+    assert.equal([...connectorToml.matchAll(/^\s*decimals\s*=\s*6\s*$/gm)].length, 2);
+  });
+
+  it('names key FILES, never key values', () => {
+    for (const file of ['signer.key', 'settlement.key', 'settlement-solana.key']) {
+      assert.match(connectorToml, new RegExp(`key_file\\s*=\\s*"/app/data/${file}"`));
+    }
+    // Nothing that looks like raw key material may appear in a committed file.
+    assert.doesNotMatch(connectorToml, /\b[0-9a-f]{64}\b/);
+  });
+});
+
+describe('the operator surface', () => {
+  it('is configured by file path only', () => {
+    assert.match(connectorToml, /bearer_token_file\s*=\s*"\/app\/data\/operator-bearer\.token"/);
+    assert.match(connectorToml, /write_keys_file\s*=\s*"\/app\/data\/operator-write\.keys"/);
+    assert.doesNotMatch(connectorToml, /^\s*bearer_token\s*=/m);
+    assert.doesNotMatch(connectorToml, /^\s*write_keys\s*=/m);
+  });
+
+  it('mounts both credential files read-only', () => {
+    assert.match(compose, /\.\/operator-bearer\.token:\/app\/data\/operator-bearer\.token:ro/);
+    assert.match(compose, /\.\/operator-write\.keys:\/app\/data\/operator-write\.keys:ro/);
+  });
+
+  it('calls the allowlist what it is: an ed25519 PUBLIC key, and not a nostr one', () => {
+    assert.match(envExample, /ED25519 PUBLIC key/);
+    assert.match(envExample, /NOT a nostr npub/);
+  });
+});
+
+describe('state', () => {
+  it('keeps the claim watermark on a named volume, never a bind', () => {
+    assert.match(connectorToml, /state_dir\s*=\s*"\/app\/state"/);
+    // A bind would start `./`; the image ships /app/state owned by uid 10001,
+    // which a fresh named volume inherits on first mount and a bind does not.
+    assert.match(compose, /^\s+- connector_state:\/app\/state$/m);
+    assert.doesNotMatch(compose, /\.\/[^\s:]*:\/app\/state/);
+    assert.match(compose, /^volumes:\n(?:.*\n)*?\s{2}connector_state:$/m);
+  });
+
+  it('needs no volume for the gateway itself, because every grant is in memory', () => {
+    // The gateway's only mount is the read-only internal certificate pair. A
+    // named volume here would imply state that survives a restart, and none
+    // does — a restart drops every grant and each tenant re-seals.
+    const gatewayBlock = compose.slice(compose.indexOf('  gateway:'), compose.indexOf('  connector:'));
+    assert.match(gatewayBlock, /- \.\/tls:\/etc\/workload-gateway\/tls:ro/);
+    assert.doesNotMatch(gatewayBlock, /^\s+- [a-z_]+:\//m);
+  });
+});
+
+describe('the connector pin', () => {
+  it('is an immutable build', () => {
+    assert.match(CONNECTOR_PIN, IMMUTABLE_PIN);
+    assert.match(compose, new RegExp(`image:\\s*${CONNECTOR_PIN.replace(/[/.]/g, '\\$&')}\\s*$`, 'm'));
+  });
+
+  it('is written in docker-compose.yml and nowhere else in the bundle', () => {
+    const elsewhere = ['connector.toml.template', 'nginx/node.conf.template', 'auto-apply.sh', 'render.sh', 'bootstrap.sh'];
+    for (const name of elsewhere) {
+      assert.doesNotMatch(read(name), /rust-sha-|rust-main|rust-release|rust-\d{4}\.\d{2}\.\d{2}\.\d+/, `${name} names a connector build`);
+    }
+  });
+
+  it('never follows a moving tag', () => {
+    assert.doesNotMatch(compose, /connector:(rust-main|rust-release|latest)\b/);
+  });
+
+  it('mounts its config rather than baking it, and builds nothing', () => {
+    assert.match(compose, /\.\/connector\.toml:\/app\/config\/connector\.toml:ro/);
+    const connectorBlock = compose.slice(compose.indexOf('  connector:'), compose.indexOf('  nginx:'));
+    assert.doesNotMatch(connectorBlock, /^\s+build:/m);
+  });
+});
+
+describe('exposure', () => {
+  it('never publishes the door', () => {
+    // Reaching GATEWAY_HANDOVER_PORT directly would be a way to tell this
+    // gateway what to serve without paying its connector a packet.
+    const publishes = [...compose.matchAll(/^\s+- '([^']*\d+:\d+)'/gm)].map((m) => m[1]);
+    for (const row of publishes) {
+      assert.doesNotMatch(row, new RegExp(`:${HANDOVER_PORT}$`), `${row} publishes the handover door`);
+    }
+    assert.match(compose, /expose: \['8080', '8443', '8081'\]/);
+  });
+
+  it('publishes the connector edge on the loopback only', () => {
+    assert.match(compose, /- '127\.0\.0\.1:4000:4000'/);
+  });
+
+  it('gives an unqualified publish to the TLS front and to nothing else', () => {
+    // Docker's iptables chain runs ahead of ufw, so an unqualified publish is
+    // internet-reachable even with ufw locked to 22/80/443.
+    const publishes = [...compose.matchAll(/^\s+- '([^']*\d+:\d+)'/gm)].map((m) => m[1]);
+    const unqualified = publishes.filter((row) => !row.startsWith('127.0.0.1:'));
+    assert.deepEqual(unqualified.sort(), ['443:443', '80:80']);
+  });
+
+  it('carries no sandbox dial rewrite', () => {
+    for (const name of ['docker-compose.yml', '.env.example']) {
+      assert.doesNotMatch(read(name).replace(/^#.*$/gm, ''), /GATEWAY_DIAL_REWRITE\s*[:=]/m);
+    }
+  });
+});
+
+describe('healthchecks', () => {
+  it('dial 127.0.0.1, never localhost', () => {
+    const tests = [...compose.matchAll(/https?:\/\/(localhost|127\.0\.0\.1)[:/]/g)].map((m) => m[1]);
+    assert.ok(tests.length > 0);
+    assert.ok(!tests.includes('localhost'));
+  });
+
+  it('prove the gateway answered, not merely that it is up', () => {
+    // An ungranted hostname is answered with the gateway's own 503 and dials
+    // nothing: a liveness probe that touches no provider.
+    assert.match(compose, /toon-gateway-reason.*no_grant/);
+  });
+
+  it('prove the connector read its signer key', () => {
+    assert.match(compose, /\/ilp\/identity/);
+  });
+});
+
+describe('the TLS edge', () => {
+  it('serves the wildcard and the edge host from one certificate lineage', () => {
+    assert.match(nginxConf, /server_name \$\{GATEWAY_DOMAIN\} \*\.\$\{GATEWAY_DOMAIN\};/);
+    assert.match(nginxConf, /server_name \$\{EDGE_HOST\};/);
+    assert.equal([...nginxConf.matchAll(/ssl_certificate\s+\/etc\/letsencrypt\/live\/\$\{CERT_NAME\}/g)].length, 2);
+  });
+
+  it('reaches the gateway over TLS, so a workload is told the scheme the visitor used', () => {
+    assert.match(nginxConf, /proxy_pass https:\/\/\$upstream:8443;/);
+    assert.match(nginxConf, /proxy_set_header X-Forwarded-Proto https;/);
+  });
+
+  it('re-resolves its upstreams, so a recreated container does not 502 until someone reloads', () => {
+    assert.equal([...nginxConf.matchAll(/resolver 127\.0\.0\.11 valid=10s ipv6=off;/g)].length, 2);
+  });
+
+  it('leaves the Host header alone, because the gateway keys everything off it', () => {
+    assert.match(nginxConf, /proxy_set_header Host \$host;/);
+  });
+});
+
+describe('render.sh', () => {
+  it('refuses an ILP edge under the gateway domain', () => {
+    // A name there is a name a tenant can never be handed.
+    assert.match(renderSh, /must not be under GATEWAY_DOMAIN/);
+  });
+
+  it('renders every file the bundle needs and nothing the bundle commits', () => {
+    for (const output of ['connector.toml', 'operator-bearer.token', 'operator-write.keys', 'nginx/conf.d/node.conf']) {
+      assert.ok(renderSh.includes(output), `render.sh does not write ${output}`);
+    }
+  });
+});
+
+describe('nothing secret is committable', () => {
+  it('gitignores every rendered output and every key', () => {
+    for (const line of ['.env', 'connector.toml', 'operator-bearer.token', 'operator-write.keys', 'nginx/conf.d/', 'tls/', '*.key']) {
+      assert.ok(
+        gitignore.split('\n').some((row) => row.trim() === line),
+        `.gitignore does not carry ${line}`,
+      );
+    }
+    assert.ok(gitignore.split('\n').some((row) => row.trim() === '!.env.example'));
+  });
+
+  it('ships an .env.example with every required variable empty', () => {
+    for (const name of ['PORKBUN_API_KEY', 'PORKBUN_SECRET_KEY', 'OPERATOR_BEARER_TOKEN', 'OPERATOR_WRITE_KEY']) {
+      assert.match(envExample, new RegExp(`^${name}=$`, 'm'), `${name} is not present-and-empty in .env.example`);
+    }
+  });
+});

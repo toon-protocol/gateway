@@ -1,0 +1,14 @@
+[Unit]
+Description=Apply the merged TOON Workload Gateway bundle (fast-forward, render, build, compose up)
+Documentation=https://github.com/toon-protocol/gateway/blob/main/deploy/README.md
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/root/gateway/deploy/auto-apply.sh
+# The script takes its own flock; this only stops systemd stacking runs.
+# Budget for the worst honest case: a cold `npm ci` image build, a multi-image
+# pull, `up -d`, two 120s health waits, an activation restart, and a third
+# wait. A SIGTERM mid-restart would leave the new config live but unverified.
+TimeoutStartSec=1800
