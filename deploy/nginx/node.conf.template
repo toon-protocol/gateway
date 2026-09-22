@@ -1,0 +1,123 @@
+# Rendered by ../render.sh -> ./conf.d/node.conf. Edit the template, not the
+# rendered file.
+#
+# Two things on one wildcard certificate:
+#   ${EDGE_HOST}          the sealed ILP edge   -> connector:4000
+#   *.${GATEWAY_DOMAIN}   every workload        -> gateway:8443
+#   ${GATEWAY_DOMAIN}     the bare domain       -> gateway:8443 (it answers 503
+#                         `no_grant`, because a grant is held for a LABEL under
+#                         the domain and never for the domain itself)
+#
+# ── The wildcard is the whole point ──────────────────────────────────────────
+# A handed-over workload is served at `<canonical label>.${GATEWAY_DOMAIN}`,
+# where the label is the lowercase unpadded base32 of the 32-byte workload id —
+# 52 characters nobody chose and nobody can predict — or at an optional
+# single-label `name` the handover asked for. So this edge cannot enumerate its
+# server names and a per-name certificate is not a thing that can exist here:
+# one wildcard certificate, one wildcard server block, and the gateway decides
+# what each name means.
+#
+# ── Why the upstream is HTTPS ────────────────────────────────────────────────
+# The gateway computes the `X-Forwarded-Proto` it hands a workload from its own
+# listener rather than from a header, so a plain-HTTP upstream would tell every
+# workload `http` while the visitor was on `https`. The hop below is therefore
+# TLS, with a long-lived self-signed certificate that never leaves this host's
+# compose network. `proxy_ssl_verify` is off by default and deliberately left
+# so: the peer is a container on a private network reached by name, and there
+# is no CA in this picture to verify it against.
+
+limit_req_zone $binary_remote_addr zone=gw:10m rate=200r/s;
+
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${EDGE_HOST} ${GATEWAY_DOMAIN} *.${GATEWAY_DOMAIN};
+
+    # Kept even though this box's certificate is issued over DNS-01: an ACME
+    # client that falls back to HTTP-01 for a non-wildcard name still finds a
+    # webroot here, and the redirect below is what everything else wants.
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+# ── The sealed ILP edge ──────────────────────────────────────────────────────
+# Where a tenant pays this gateway's connector for a Gateway Handover. Its own
+# name, outside ${GATEWAY_DOMAIN}, so it takes no label away from a tenant.
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name ${EDGE_HOST};
+
+    ssl_certificate     /etc/letsencrypt/live/${CERT_NAME}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${CERT_NAME}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    # Docker's embedded DNS, re-resolved every 10s. This is load-bearing:
+    # nginx resolves a literal upstream hostname ONCE at config-parse time, so
+    # a recreated container would 502 until someone reloaded nginx.
+    resolver 127.0.0.11 valid=10s ipv6=off;
+
+    location ^~ /admin { return 404; }
+
+    location / {
+        limit_req zone=gw burst=400 nodelay;
+        set $upstream connector;
+        proxy_pass http://$upstream:4000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_read_timeout 1h;
+        client_max_body_size 1m;
+    }
+}
+
+# ── Every workload ───────────────────────────────────────────────────────────
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name ${GATEWAY_DOMAIN} *.${GATEWAY_DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/${CERT_NAME}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${CERT_NAME}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    resolver 127.0.0.11 valid=10s ipv6=off;
+
+    location / {
+        limit_req zone=gw burst=400 nodelay;
+        set $upstream gateway;
+        proxy_pass https://$upstream:8443;
+        proxy_http_version 1.1;
+        # The gateway keys everything off Host, and forwards it to the workload
+        # untouched. Rewriting it here would make every workload see this
+        # box's idea of its own name instead of the one the visitor typed.
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        # A workload is an arbitrary HTTP app: websockets, long polls and
+        # uploads all have to survive this hop.
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+        client_max_body_size 64m;
+        # SNI for the upstream hop, so the self-signed certificate is presented
+        # for a name rather than for whatever nginx last resolved.
+        proxy_ssl_server_name on;
+        proxy_ssl_name $upstream;
+    }
+}

@@ -1,0 +1,12 @@
+# Secrets and rendered output. Only the templates are committed.
+.env
+.env.*
+!.env.example
+connector.toml
+operator-bearer.token
+operator-write.keys
+nginx/conf.d/
+tls/
+*.key
+*.crt
+*.secret

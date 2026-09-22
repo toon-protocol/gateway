@@ -2,3 +2,10 @@ node_modules
 tests
 *.log
 .git
+# The deploy bundle. deploy/docker-compose.yml builds from `..`, so the
+# repository root is the build context — and on a box that directory holds the
+# .env, the three key files and the rendered config. The Dockerfile COPYs none
+# of it, but none of it should be handed to the daemon either.
+deploy
+.github
+

@@ -1,0 +1,39 @@
+# The gateway's tests and its type check.
+#
+# This repository had no workflow at all until the deploy bundle landed, and a
+# guard on that bundle (deploy/bundle.test.mjs) that nothing runs is not a
+# guard.
+#
+# The guard is its OWN step rather than another glob on `npm test`. Several of
+# the source tests stand real listeners up and are timing-sensitive; adding a
+# thirty-third concurrent test file to that run made one of them time out
+# occasionally. The bundle guard reads files and asserts on bytes, so it costs
+# nothing to run on its own, and keeping the two apart leaves `npm test`
+# behaving exactly as it did.
+name: ci
+
+on:
+  push:
+    branches: [main, milestone-5, milestone-7]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # `npm ci` and not `npm install`: the lockfile is the thing under test
+      # as much as the source is.
+      - run: npm ci
+      - run: npm test
+      - run: npm run test:deploy
+      - run: npm run typecheck

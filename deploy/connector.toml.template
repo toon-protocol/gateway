@@ -1,0 +1,143 @@
+# =============================================================================
+# Connector config for the TOON Workload Gateway box — rendered by ./render.sh
+# =============================================================================
+# ADR 0013 puts a Workload Gateway behind its own connector like any other TOON
+# app, and this is that connector. It terminates ONE route: the sealed Gateway
+# Handover — and the Gateway Withdrawal, which rides the same route (spec
+# §12.1, §12.7) — by which a tenant tells this gateway what to serve and what
+# to stop serving. Nothing is published on either side, so that packet is the
+# only way anything reaches the gateway, and this connector is the party that
+# unseals it: the tenant seals to THIS node's signer key, and the gateway
+# behind it reads plaintext JSON.
+#
+# Three rules the parser enforces, worth knowing before you edit:
+#
+#   * One TOML file, read once at startup, immutable for the process
+#     lifetime. There is NO environment-variable layer — the only variable the
+#     connector reads is RUST_LOG. Editing this file does nothing until the
+#     container restarts (a bind mount is not a reload).
+#   * Unknown keys are a hard startup failure, and removed keys are refused by
+#     name. A stale config says so at boot instead of quietly doing nothing,
+#     but it means a config change and a connector upgrade must land in the
+#     right order. Land config first.
+#   * Every key that carries a secret is a PATH, never the value. Nothing in
+#     this file is a credential, so the rendered connector.toml is not secret.
+#
+# deploy/README.md § "Bumping the connector pin" has the procedure, and
+# deploy/bundle.test.mjs fails the build if this file and the pin disagree.
+# =============================================================================
+
+# The client edge: POST /ilp, GET /ilp/btp, GET /ilp/identity and /metrics all
+# share this port. Bound to 0.0.0.0 INSIDE the container only — docker-compose
+# publishes it on 127.0.0.1, and nginx is what faces the internet.
+client_edge_addr = "0.0.0.0:4000"
+
+# Where this node records which claims it has already been paid. This MUST be a
+# mounted volume: a watermark that dies with the container hands every payer
+# their spent claims back as free service.
+state_dir = "/app/state"
+
+# No peering is expected here and none is configured. `peer_expose` still names
+# a carriage because `[node]` below declares endpoints, and the two must agree;
+# "http" is the sandbox's choice for this node and costs nothing when no peer
+# ever dials.
+peer_expose = "http"
+
+# ── The gateway's identity ───────────────────────────────────────────────────
+# THIS IS THE KEY A TENANT SEALS ITS HANDOVER TO. The gateway process itself
+# holds no key at all (spec §12.1, ADR 0016: nothing is signed and nothing is
+# published), so as far as a tenant is concerned this node's signing key IS the
+# gateway. `GET /ilp/identity` answers with its public half, and the tenant
+# pins that value. Replacing this file makes this a different gateway and every
+# grant already handed over stops being addressable.
+[signer]
+key_file = "/app/data/signer.key"
+
+
+# ── The one terminated route ─────────────────────────────────────────────────
+# One route, two messages: the body's single key — `handover` or `withdrawal` —
+# says which (spec §12.1, §12.7).
+#
+# THE ROUTE IS FREE. Pricing a gateway's service is still deferred (#46, Out of
+# Scope): `price = 0` is written rather than left out because a terminated
+# route is never silently free — the parser requires a price.
+#
+# THE HANDLER PATH IS LOAD-BEARING. The tenant tool seals with the connector
+# client's DEFAULT target, which the connector resolves to this handler_url
+# UNCHANGED (connector ADR 0025) — and the gateway's door answers POST
+# /handover and 404s every other path. So the path a handover lands on is
+# decided HERE and nowhere else, which is where it belongs: a tenant knows the
+# route it pays for, not the listener behind it. Change this path and every
+# handover is refused `invalid_handover` with nothing asked of anybody.
+#
+# The port is the gateway's GATEWAY_HANDOVER_PORT, and the host is its compose
+# service name. That listener is published on no host port, deliberately: a
+# handover that did not come through this connector is not a message this
+# gateway should ever see.
+[[routes]]
+prefix      = "g.toon.workload-gateway.handover"
+handler_url = "http://gateway:8081/handover"
+price       = 0
+
+
+# ── Getting paid, for a route that charges nothing ───────────────────────────
+# Settlement is here FOR THE TENANT'S SAKE, not this node's. A connector client
+# opens its channel against the settlement key the payee's `GET /ilp` reports,
+# and a node with no settlement table has nothing to open one against — free
+# route or not. Both chains are offered so a tenant pays on whichever it
+# already holds, exactly as the store and relay boxes do.
+#
+# Fail-closed at STARTUP: the connector resolves token_address through the
+# registry at contract_address and reads the token's own decimals(). A wrong
+# address here is a refuse-to-start, not a silently mispriced node. These
+# values are the ones the devnet's other connectors answer with; read them back
+# from any of their `GET /ilp` rather than trusting a second copy of them.
+
+[settlement.evm]
+rpc_url          = "https://base-sepolia-rpc.publicnode.com"
+contract_address = "0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5"  # TokenNetworkRegistry
+token_address    = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"  # mock USDC (6dp)
+decimals         = 6
+
+[settlement.evm.key]
+key_file = "/app/data/settlement.key"
+
+[settlement.solana]
+rpc_url       = "https://api.devnet.solana.com"
+program_id    = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip"
+token_address = "34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU"   # mock USDC (6dp)
+decimals      = 6
+
+[settlement.solana.key]
+key_file = "/app/data/settlement-solana.key"
+
+
+# ── The operator surface ─────────────────────────────────────────────────────
+# Gates /metrics and the redeem endpoints. Without this section they are not
+# mounted at all (404, not 401). On this node `GET /claims` answers an empty
+# book — a free route books nothing — which is the point: the shape is
+# complete, and an operator can see that nothing was charged.
+#
+# Both are FILE-VALUED. The values live in two files render.sh writes from
+# .env, 0600 and owned by uid 10001, mounted beside the key files. A section
+# naming a file that is missing or empty is a refuse-to-start, never a silently
+# open surface.
+[operator]
+bearer_token_file = "/app/data/operator-bearer.token"
+write_keys_file   = "/app/data/operator-write.keys"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# THIS DEPLOYMENT — the TOON devnet Workload Gateway box
+# ═════════════════════════════════════════════════════════════════════════════
+# Everything above describes any Workload Gateway behind any connector. What
+# follows is specific to this box's place in the TOON devnet.
+#
+# The ILP edge deliberately does NOT live under the gateway's own domain. The
+# gateway serves every single label under `${GATEWAY_DOMAIN}` as a workload
+# hostname, so a name taken there is a name a tenant cannot have; this node's
+# edge sits beside it instead.
+[node]
+addresses     = ["g.toon.workload-gateway"]
+http_endpoint = "https://${EDGE_HOST}/ilp"
+btp_endpoint  = "wss://${EDGE_HOST}/ilp/btp"
