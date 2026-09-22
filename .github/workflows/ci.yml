@@ -14,7 +14,7 @@ name: ci
 
 on:
   push:
-    branches: [main, milestone-5, milestone-7]
+    branches: [main]
   pull_request:
 
 concurrency:
