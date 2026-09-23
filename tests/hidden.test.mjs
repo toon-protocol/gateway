@@ -145,7 +145,7 @@ describe('a workload on a Hidden Provider', () => {
     // the same request a public member gets: unsigned, presenting the grant.
     assert.ok(proxy.askedFor(CONNECTOR_NAME, 80), `the proxy was asked for ${CONNECTOR_NAME}:80; it saw ${JSON.stringify(proxy.destinations)}`);
     const [asked] = hidden.connector.requests;
-    assert.equal(asked.path, '/status');
+    assert.equal(asked.destination, hidden.connector.destination, 'the free `status` route');
     assert.equal(asked.request.sig, undefined, 'nobody signs a Lease Request');
     assert.equal(asked.content.workload_id, WORKLOAD);
     assert.ok(asked.continuation !== undefined, 'presenting the grant');

@@ -1,10 +1,18 @@
 // The Provider Profiles of a workload's Standby Set (spec §4.1).
 //
 // Resolution follows the GRANT: the grant names the members, and each member's
-// Profile is the only thing that says where to ask it anything — its
-// `connector_url` — and where it publishes — its Relay Set. Nothing else here
-// is a source of truth about a member: a gateway never guesses a connector
-// from a host, and never asks a member the grant does not name.
+// Profile is the only thing that says how to ask it anything — where its
+// connector is (`connector_url`), what to address there (`ilp_address`) and
+// whose key to seal to (`connector_seal_key`) — and where it publishes: its
+// Relay Set. Nothing else here is a source of truth about a member: a gateway
+// never guesses a connector from a host, never invents a path beside one, and
+// never asks a member the grant does not name.
+//
+// THOSE THREE ARE READ TOGETHER because they are one fact: how this member is
+// reached (spec §4.1, §5). A Profile carrying only one or two of them names a
+// carriage nobody can complete, and a member whose Profile does not parse is a
+// member that cannot be reached — which resolution already has an answer for
+// (`member_unreachable`) and which is the honest one.
 //
 // Two relay sets are in play and they are not the same. A gateway is
 // configured with relays of its own (`GATEWAY_RELAYS`), which is where it
@@ -21,6 +29,12 @@
 import { K_PROFILE } from './kinds.mjs';
 import { verifyEvent } from './nostr.mjs';
 import { isAnyoneHost } from './dial.mjs';
+
+/** An ILP address, as the tenant tool spells the same check (spec §4.1). */
+const ILP_ADDRESS = /^[a-zA-Z0-9._~-]+$/;
+
+/** A secp256k1 public key as hex: 65 bytes uncompressed (`04…`) or 33 compressed (`02…`/`03…`). */
+const SEAL_KEY = /^(04[0-9a-fA-F]{128}|0[23][0-9a-fA-F]{64})$/;
 
 /**
  * Read one event as a Provider Profile, or throw saying which field is wrong.
@@ -46,7 +60,13 @@ export function readProfile(event) {
     throw new Error('its content is not a JSON object');
   }
 
-  const { connector_url: connectorUrl, relays, liveness_cadence_s: cadence } = content;
+  const {
+    connector_url: connectorUrl,
+    ilp_address: ilpAddress,
+    connector_seal_key: sealKey,
+    relays,
+    liveness_cadence_s: cadence,
+  } = content;
   const named = Array.isArray(relays) ? relays.filter((r) => typeof r === 'string') : [];
   // A relay at an `.anyone` host is never dialled directly (spec §12.8), and
   // this gateway reaches relays directly: so it is not one this gateway can
@@ -60,10 +80,29 @@ export function readProfile(event) {
   } catch {
     throw new Error(`its \`connector_url\` is not a URL: ${JSON.stringify(connectorUrl)}`);
   }
+  if (typeof ilpAddress !== 'string' || !ILP_ADDRESS.test(ilpAddress)) {
+    throw new Error(
+      `its \`ilp_address\` is missing or is not an ILP address: ${JSON.stringify(ilpAddress)}. ` +
+        'It is the prefix of every route this member\'s connector terminates (spec §5), so ' +
+        'without it there is no `<addr>.status` to address.',
+    );
+  }
+  const connectorSealKey = typeof sealKey === 'string' ? sealKey.replace(/^0x/i, '') : undefined;
+  if (connectorSealKey === undefined || !SEAL_KEY.test(connectorSealKey)) {
+    throw new Error(
+      `its \`connector_seal_key\` is missing or is not a secp256k1 public key: ${JSON.stringify(sealKey)}. ` +
+        'It is the key a request to this member is sealed to (spec §3, ADR 0011), and nothing ' +
+        'fetches it in its place.',
+    );
+  }
 
   return {
     provider: event.pubkey,
     connectorUrl,
+    /** What this member's connector terminates: `<ilp_address>.status` is the route asked (spec §5). */
+    ilpAddress,
+    /** The key a request to this member is sealed to (spec §3, ADR 0011), `0x` stripped. */
+    connectorSealKey,
     /** The provider's own Relay Set (spec §4), which may not be ours — less any relay at an `.anyone` host. */
     relays: named.filter((url) => !hiddenRelays.includes(url)),
     /** The relays this gateway will not watch: at `.anyone` hosts, never dialled directly. */

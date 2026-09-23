@@ -98,7 +98,7 @@ describe('forwarding to the running member', () => {
     for (const [index, connector] of connectors.entries()) {
       const [asked] = connector.requests;
       assert.ok(asked !== undefined, `member ${index} was not asked`);
-      assert.equal(asked.path, '/status');
+      assert.equal(asked.destination, connector.destination, 'the free `status` route of that member');
       assert.equal(asked.request.sig, undefined, 'nobody signs a Lease Request');
       assert.equal(
         asked.continuation,
@@ -125,8 +125,8 @@ describe('forwarding to the running member', () => {
     // (spec §5): this gateway holds no lease and calls nothing that is priced.
     for (const connector of connectors) {
       assert.deepEqual(
-        [...new Set(connector.requests.map((asked) => asked.path))],
-        ['/status'],
+        [...new Set(connector.requests.map((asked) => asked.destination))],
+        [connector.destination],
         'a gateway calls no route but `status`',
       );
     }

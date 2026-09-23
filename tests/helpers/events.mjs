@@ -11,8 +11,28 @@
 
 import { readFileSync } from 'node:fs';
 
+import { giftWrapPublicKey } from '@toon-protocol/client';
+
 import { K_LIVENESS, K_PROFILE, K_TAKEOVER, LABEL } from '../../src/kinds.mjs';
 import { signEvent } from './sign.mjs';
+
+/**
+ * The sealing identity every stub connector in this suite holds, and the
+ * `connector_seal_key` a Profile therefore pins (spec §3, §4.1; ADR 0011).
+ *
+ * ONE identity for the whole suite, because a stub connector is told apart by
+ * the `connector_url` its Profile names and never by its key — and because a
+ * key that a test had to line up by hand with the Profile that pins it is a
+ * test that fails for the wrong reason. The Profile's key is DERIVED from this
+ * secret rather than written down beside it, so the two cannot drift.
+ */
+export const FIXTURE_SEAL_SECRET = new Uint8Array(32).fill(0x11);
+
+/** What a stub connector's Profile says its `ilp_address` is (spec §4.1). */
+export const FIXTURE_ILP_ADDRESS = 'g.fixture';
+
+/** That secret's public key, `0x`-prefixed exactly as a connector reports it. */
+export const FIXTURE_SEAL_KEY = `0x${Buffer.from(giftWrapPublicKey(FIXTURE_SEAL_SECRET)).toString('hex')}`;
 
 /** The test-only keys, clock and kind numbers every wire fixture was made in. */
 export const CONSTANTS = JSON.parse(
@@ -25,13 +45,14 @@ export const wireFixture = (name) =>
 /** A Provider Profile (spec §4.1), signed by a provider. */
 /**
  * @param {{
- *   providerSecret?: string, ilpAddress?: string, connectorUrl?: string, relays?: string[],
+ *   providerSecret?: string, ilpAddress?: string, sealKey?: string, connectorUrl?: string, relays?: string[],
  *   host?: string, hidden?: boolean, livenessCadenceS?: number, createdAt?: number,
  * }} [options]
  */
 export function providerProfile({
   providerSecret = CONSTANTS.provider.secret_key,
-  ilpAddress = 'g.fixture',
+  ilpAddress = FIXTURE_ILP_ADDRESS,
+  sealKey = FIXTURE_SEAL_KEY,
   connectorUrl,
   relays = [],
   host = '203.0.113.7',
@@ -42,7 +63,7 @@ export function providerProfile({
   const content = {
     ilp_address: ilpAddress,
     connector_url: connectorUrl,
-    connector_seal_key: '0x04' + '11'.repeat(64),
+    connector_seal_key: sealKey,
     relays,
     settlement: [{ chain: 'solana', token: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', decimals: 6 }],
     isolation: 'shared-kernel',

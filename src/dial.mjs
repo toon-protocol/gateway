@@ -1,13 +1,17 @@
 // How this gateway opens a TCP connection, and the one kind of host it never
 // opens one to directly (spec §10, §12.8).
 //
-// Every outbound connection a gateway makes — asking a member for `status`,
-// and forwarding a tenant's request to the workload — goes through ONE seam:
+// Forwarding a tenant's request to the workload goes through ONE seam here:
 // `connect(host, port)` returns a socket on its way, or `undefined` meaning
-// "an ordinary direct dial". Both legs share it on purpose, because both legs
-// can land on a Hidden Provider: its connector is at an `.anyone` address and
-// so is every lease it runs (ADR 0008), and a gateway that got one leg right
-// and the other wrong would leak exactly what hiding is for.
+// "an ordinary direct dial". The OTHER outbound leg — asking a member for
+// `status` — does not open its own socket at all: it hands the packet to a
+// connector client (`src/status.mjs`), which is given this same proxy for an
+// `.anyone` connector and none for any other host. Both legs can land on a
+// Hidden Provider — its connector is at an `.anyone` address and so is every
+// lease it runs (ADR 0008) — and a gateway that got one leg right and the
+// other wrong would leak exactly what hiding is for, so the RULE is shared
+// even though the socket is not: `isAnyoneHost` below is what both consult,
+// and `NoProxyError` is what both raise.
 //
 // An `.anyone` address is dialled through the configured `socks5h://` proxy —
 // an `anon` client — and the gateway is an ordinary client of it: the name

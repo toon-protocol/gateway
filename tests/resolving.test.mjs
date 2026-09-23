@@ -102,6 +102,55 @@ describe('when a member tells this gateway nothing', () => {
     assert.match(answered.json().message, /bad_grant/);
   });
 
+  it('does not call a hop in front of the member an answer about the lease', async (t) => {
+    // THE BUG OF TOON_Network#114, in one test. Something that is not the
+    // member's connector answers the client edge — an nginx that 404s every
+    // path but the ones it proxies, which is what a deployment's provider box
+    // actually does. Nothing about the lease was learned, and telling the
+    // tenant `no_running_member` would send it to the lease rather than to
+    // the hop that swallowed the request.
+    const { connector, profile } = await member(t, runningAt(41000));
+    connector.edgeAnswers(() => ({ status: 404, body: '' }));
+
+    const gateway = await startTestGateway({
+      events: [profile],
+      handovers: [handoverFor()],
+      probe: admitAll,
+      env: { GATEWAY_RESOLVE_TIMEOUT_MS: '1000' },
+    });
+    t.after(() => gateway.close());
+
+    const answered = await gateway.get(gateway.hostFor(WORKLOAD));
+    assert.equal(answered.status, 503);
+    assert.equal(answered.headers['toon-gateway-reason'], 'member_unreachable');
+    assert.equal(connector.requests.length, 0, 'nothing ever reached the member itself');
+
+    // And the log says what was asked and where, so an operator is pointed at
+    // the carriage rather than at the lease.
+    const said = gateway.log.join('\n');
+    assert.match(said, new RegExp(`${connector.ilpAddress}\\.status`), said);
+    assert.match(said, new RegExp(connector.url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), said);
+  });
+
+  it('does not call a member answering something that is not a `status` one either', async (t) => {
+    // The member's connector is reached and answers — with an HTML error page
+    // from whatever is behind it. `state` is absent, so the lease was not
+    // described and the answer is not about it.
+    const { profile } = await member(t, () => ({ ok: false, detail: 'not a status document' }));
+
+    const gateway = await startTestGateway({
+      events: [profile],
+      handovers: [handoverFor()],
+      probe: admitAll,
+      env: { GATEWAY_RESOLVE_TIMEOUT_MS: '1000' },
+    });
+    t.after(() => gateway.close());
+
+    const answered = await gateway.get(gateway.hostFor(WORKLOAD));
+    assert.equal(answered.headers['toon-gateway-reason'], 'member_unreachable');
+    assert.match(gateway.log.join('\n'), /not a `status` document/);
+  });
+
   it('cannot ask a member whose Provider Profile it has never seen', async (t) => {
     // The grant names a member; no Profile of that member is on any relay, so
     // there is nowhere to ask it anything.
@@ -115,6 +164,36 @@ describe('when a member tells this gateway nothing', () => {
     const answered = await gateway.get(gateway.hostFor(WORKLOAD));
     assert.equal(answered.headers['toon-gateway-reason'], 'member_unreachable');
     assert.match(answered.json().message, /Profile/i);
+  });
+
+  it('cannot ask a member whose Profile names no key to seal to', async (t) => {
+    // `connector_url`, `ilp_address` and `connector_seal_key` are one fact —
+    // how this member is reached (spec §4.1, §5) — and a Profile carrying
+    // only some of them describes a carriage nobody can complete. It is
+    // dropped where it is read, which leaves the member unreachable: the
+    // honest answer, and never a member that "answered" nothing.
+    const { connector } = await member(t, runningAt(41000));
+    const profile = providerProfile({
+      providerSecret: MEMBER.secret_key,
+      connectorUrl: connector.url,
+      sealKey: 'not a key',
+      relays: [],
+    });
+
+    const gateway = await startTestGateway({
+      events: [profile],
+      handovers: [handoverFor()],
+      probe: admitAll,
+      env: { GATEWAY_RESOLVE_TIMEOUT_MS: '250' },
+    });
+    t.after(() => gateway.close());
+
+    assert.equal(
+      (await gateway.get(gateway.hostFor(WORKLOAD))).headers['toon-gateway-reason'],
+      'member_unreachable',
+    );
+    assert.match(gateway.log.join('\n'), /connector_seal_key/);
+    assert.equal(connector.requests.length, 0, 'and nothing was sent anywhere');
   });
 });
 
