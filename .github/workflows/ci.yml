@@ -23,6 +23,9 @@ on:
     branches: [main, milestone-5, milestone-7]
   pull_request:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -43,3 +46,51 @@ jobs:
       - run: npm test
       - run: npm run test:deploy
       - run: npm run typecheck
+
+  docker-build:
+    # Builds the same image `deploy/docker-compose.yml`'s `gateway` service
+    # builds on a box (`build: {context: ..}`, Dockerfile header: "One `docker
+    # build .` at the repo root"), so a change that breaks that build is
+    # caught here instead of on the next `auto-apply.sh` fast-forward
+    # (TOON_Network#108; the provider's equivalent gap merged #79's
+    # `is_multiple_of` past every check and only failed inside the image).
+    name: Build gateway image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node's version is pinned three times today (`Dockerfile`'s `FROM
+      # node:22-slim`, this job's `setup-node` above, and `package.json`'s
+      # `engines.node`) rather than from one file a single toolchain pin would
+      # read — see "Why not a toolchain-pin file" in the PR description for
+      # why that was not worth adding here. This assert is the cheap
+      # alternative: it fails loudly the moment the Dockerfile's major
+      # version stops matching what the rest of the repo expects, instead of
+      # drifting silently the way TOON_Network#79 did for the provider.
+      - name: Assert the Dockerfile's Node major version matches package.json
+        run: |
+          set -euo pipefail
+          dockerfile_major=$(grep -m1 '^FROM node:' Dockerfile | sed -E 's/^FROM node:([0-9]+).*/\1/')
+          pkg_major=$(node -e "console.log((require('./package.json').engines.node.match(/\d+/) || [''])[0])")
+          echo "Dockerfile:    node:${dockerfile_major}"
+          echo "package.json:  >=${pkg_major}"
+          if [ "${dockerfile_major}" != "${pkg_major}" ]; then
+            echo "::error::Dockerfile pins node:${dockerfile_major} but package.json's engines.node names ${pkg_major} — bump both together."
+            exit 1
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Not pushed: no registry write, no `packages: write` permission. See
+      # the PR description for the publish question this ticket asks but
+      # does not, for now, answer yes to.
+      - name: Build gateway image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          tags: toon-gateway:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
