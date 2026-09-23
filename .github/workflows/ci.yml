@@ -4,17 +4,23 @@
 # guard on that bundle (deploy/bundle.test.mjs) that nothing runs is not a
 # guard.
 #
-# The guard is its OWN step rather than another glob on `npm test`. Several of
-# the source tests stand real listeners up and are timing-sensitive; adding a
-# thirty-third concurrent test file to that run made one of them time out
-# occasionally. The bundle guard reads files and asserts on bytes, so it costs
-# nothing to run on its own, and keeping the two apart leaves `npm test`
-# behaving exactly as it did.
+# The guard is its OWN step rather than another glob on `npm test`, though not
+# because the two compete: the bundle guard reads files and asserts on bytes,
+# so it opens no socket and stands up no listener. (An earlier version of this
+# note blamed a thirty-third concurrent test file for making a timing-sensitive
+# source test time out occasionally; TOON_Network#109 found the real cause —
+# `tests/rotation.test.mjs` firing its first handover before the admission
+# round's own relay connection was open, so a busy machine could lose the race
+# against a short resolve timeout before a byte was exchanged — and fixed it by
+# having the test harness wait for the real thing admission needs, a known
+# Provider Profile, rather than by keeping the suite's concurrency down.)
+# Keeping the guard apart still costs nothing, and leaves `npm test` behaving
+# exactly as it did.
 name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, milestone-5, milestone-7]
   pull_request:
 
 concurrency:
