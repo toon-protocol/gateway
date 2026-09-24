@@ -3,7 +3,7 @@
 # =============================================================================
 #   nginx       the public TLS edge (the only thing bound to a public port)
 #   certbot     issues and renews ONE wildcard certificate, over DNS-01
-#   gateway     this repository, built from the checkout the box follows
+#   gateway     ghcr.io/toon-protocol/gateway, an immutable pin
 #   connector   the gateway's own payment proxy (ADR 0013): it unseals a
 #               Gateway Handover and forwards it to the gateway's door
 #
@@ -14,14 +14,12 @@
 # See ./README.md — nothing here works without the key files and .env it lists.
 #
 # ── Why there is no Watchtower here ──────────────────────────────────────────
-# The store and relay boxes run Watchtower because their app is a published
-# image on a moving `:release` tag. This repository publishes no image yet, so
-# the `gateway` service below is BUILT FROM THE CHECKOUT — and the checkout is
-# what `auto-apply.sh` fast-forwards every five minutes. The update path is
-# therefore the git one, for the app and the config together, and a Watchtower
-# here would have nothing to follow. The connector is an immutable pin, as it
-# is on every other box, so it would have nothing to follow either.
-# README § "How updates arrive".
+# The store and relay boxes run Watchtower because their app follows a moving
+# `:release` tag. Both images here are pinned by immutable tag instead
+# (TOON_Network#155 for the gateway, matching the connector's own regime), and
+# a Watchtower has nothing to follow a pin that only ever moves by a reviewed
+# commit — see README § "How updates arrive" and "Bumping the connector pin"
+# (which covers bumping this pin too).
 # =============================================================================
 
 name: gateway
@@ -33,10 +31,19 @@ services:
   # to tell the gateway what to serve without paying its connector a packet,
   # which is the one thing the connector exists to prevent.
   gateway:
-    build:
-      # The repository this bundle lives in. `auto-apply.sh` rebuilds it when
-      # main moves; a `docker compose build` is a no-op when nothing changed.
-      context: ..
+    # An IMMUTABLE pin, published by
+    # .github/workflows/publish-gateway-image.yml on every push to `main`
+    # (TOON_Network#155) and bumped here by a reviewed commit — never a
+    # floating tag, same regime as the connector's pin below.
+    #
+    # `sha-0000000` is git's own convention for "no commit" (the all-zero
+    # object id), used deliberately: this workflow has not published anything
+    # yet, so there is no real tag to write here honestly. It is replaced with
+    # the first real `sha-<short>` the workflow publishes once this branch
+    # reaches `main` — see the PR's "For a human" and
+    # deploy/bundle.test.mjs's "the gateway pin" tests, which check the SHAPE
+    # of this pin, not this literal value.
+    image: ghcr.io/toon-protocol/gateway:sha-0000000
     environment:
       # Every workload is served at `<label>.${GATEWAY_DOMAIN}`, so a wildcard
       # A-record and a wildcard certificate both point here. README § DNS.
