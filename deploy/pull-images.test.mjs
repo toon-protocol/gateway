@@ -119,7 +119,11 @@ describe('who gets images through it', () => {
         .split('\n')
         .filter((line) => !/^\s*#/.test(line))
         .join('\n');
-      assert.match(code, /^\s*\.\/pull-images\.sh\s*$/m);
+      // Bootstrap calls it bare; auto-apply.sh (TOON_Network#160) wraps it in
+      // `if ! ... ; then` so a failed pull is reported by name -- but it is
+      // still the ONE call site, with nothing of its own between it and
+      // pull-images.sh deciding what to pull or build.
+      assert.match(code, /^\s*(if\s*!\s*)?\.\/pull-images\.sh(\s*;\s*then)?\s*$/m);
       assert.doesNotMatch(code, /docker compose\b[^\n]*\s(pull|build)\b/);
       assert.doesNotMatch(code, /--ignore-(pull-failures|buildable)/);
     });
