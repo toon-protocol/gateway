@@ -36,14 +36,10 @@ services:
     # (TOON_Network#155) and bumped here by a reviewed commit — never a
     # floating tag, same regime as the connector's pin below.
     #
-    # `sha-0000000` is git's own convention for "no commit" (the all-zero
-    # object id), used deliberately: this workflow has not published anything
-    # yet, so there is no real tag to write here honestly. It is replaced with
-    # the first real `sha-<short>` the workflow publishes once this branch
-    # reaches `main` — see the PR's "For a human" and
-    # deploy/bundle.test.mjs's "the gateway pin" tests, which check the SHAPE
-    # of this pin, not this literal value.
-    image: ghcr.io/toon-protocol/gateway:sha-0000000
+    # `sha-b469549` is the workflow's first publish, from the merge of #12.
+    # deploy/bundle.test.mjs's "the gateway pin" tests check the SHAPE of this
+    # pin, not its value.
+    image: ghcr.io/toon-protocol/gateway:sha-b469549
     environment:
       # Every workload is served at `<label>.${GATEWAY_DOMAIN}`, so a wildcard
       # A-record and a wildcard certificate both point here. README § DNS.

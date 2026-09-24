@@ -55,16 +55,12 @@ const IMMUTABLE_PIN = /:(rust-sha-[0-9a-f]{7,40}|rust-\d{4}\.\d{2}\.\d{2}\.\d+)$
 
 // ── The gateway pin (TOON_Network#155) ──────────────────────────────────────
 //
-// .github/workflows/publish-gateway-image.yml has not published anything yet
-// — this bundle carries `sha-0000000`, git's own null-object-id spelling,
-// honestly, until the first real `sha-<short>` exists once this merges to
-// `main` (see the PR's "For a human" and the comment above `gateway.image` in
-// docker-compose.yml). So unlike CONNECTOR_PIN above, GATEWAY_PIN's literal
-// value is not asserted here — there isn't a real one yet. What the tests
-// below hold still is the SHAPE (an immutable tag, never a floating alias,
-// never a `build:`) and the single-location invariant, the same two
-// properties the connector's pin is held to.
-const GATEWAY_PIN = 'ghcr.io/toon-protocol/gateway:sha-0000000';
+// The pin is the workflow's first publish, from the merge of #12, and its
+// literal is held here beside the compose file's the way CONNECTOR_PIN is:
+// the pin moves by a reviewed commit that changes both. The tests below also
+// hold its SHAPE (an immutable tag, never a floating alias, never a `build:`)
+// and that it is written in exactly one place.
+const GATEWAY_PIN = 'ghcr.io/toon-protocol/gateway:sha-b469549';
 // This repository's own scheme has no `rust-` prefix (it isn't Rust): a
 // `sha-<short-sha>` build, or a bare dated/semver-shaped release alias such as
 // `2026.09.11.1` or `1.2.3`. `latest`, `main` and anything empty are
@@ -243,9 +239,8 @@ describe('the gateway pin', () => {
   });
 
   it('is an immutable build, in shape', () => {
-    // Not the connector's literal-value assertion above: no real tag has been
-    // published yet (see the comment on GATEWAY_PIN), so this checks the
-    // SHAPE of the pin this bundle actually ships.
+    // The literal is GATEWAY_PIN's; this holds that it is an immutable tag
+    // and that the compose file ships exactly it.
     assert.match(GATEWAY_PIN, IMMUTABLE_GATEWAY_PIN);
     assert.match(compose, new RegExp(`image:\\s*${rx(GATEWAY_PIN)}\\s*$`, 'm'));
   });
