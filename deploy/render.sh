@@ -196,8 +196,8 @@ mkdir -p nginx/conf.d
 envsubst '${EDGE_HOST} ${GATEWAY_DOMAIN} ${CERT_NAME}' \
   < nginx/node.conf.template > nginx/conf.d/node.conf
 
-echo "rendered connector.toml, the operator credential files (0600) and"
-echo "  nginx/conf.d/node.conf"
+echo "rendered connector.toml, the operator credential files (0600), dns-01.env (0600)"
+echo "  and nginx/conf.d/node.conf"
 echo "  workloads            : *.${GATEWAY_DOMAIN}"
 echo "  ILP edge             : ${EDGE_HOST}"
 echo "  certificate lineage  : ${CERT_NAME}"
