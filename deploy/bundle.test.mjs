@@ -16,7 +16,8 @@
 //   * the settlement deployment, because a node that settles against the
 //     wrong token cannot be paid and says so only at boot;
 //   * `[node]`, because a node that cannot say where it is cannot be reached;
-//   * the connector pin, in exactly one place, because two copies drift;
+//   * the connector pin and the gateway pin, each in exactly one place,
+//     because two copies drift;
 //   * the exposure invariants: the door is never published, the connector's
 //     edge is loopback-only, and only the TLS front faces the internet;
 //   * `GATEWAY_DIAL_REWRITE`, which is the sandbox's one line that would be
@@ -51,6 +52,24 @@ const CONNECTOR_PIN = 'ghcr.io/toon-protocol/connector:rust-2026.09.11.1';
 // An immutable build: a dated release alias or an exact commit. Never
 // `rust-main`, and never the retired `rust-release` pointer.
 const IMMUTABLE_PIN = /:(rust-sha-[0-9a-f]{7,40}|rust-\d{4}\.\d{2}\.\d{2}\.\d+)$/;
+
+// ── The gateway pin (TOON_Network#155) ──────────────────────────────────────
+//
+// .github/workflows/publish-gateway-image.yml has not published anything yet
+// — this bundle carries `sha-0000000`, git's own null-object-id spelling,
+// honestly, until the first real `sha-<short>` exists once this merges to
+// `main` (see the PR's "For a human" and the comment above `gateway.image` in
+// docker-compose.yml). So unlike CONNECTOR_PIN above, GATEWAY_PIN's literal
+// value is not asserted here — there isn't a real one yet. What the tests
+// below hold still is the SHAPE (an immutable tag, never a floating alias,
+// never a `build:`) and the single-location invariant, the same two
+// properties the connector's pin is held to.
+const GATEWAY_PIN = 'ghcr.io/toon-protocol/gateway:sha-0000000';
+// This repository's own scheme has no `rust-` prefix (it isn't Rust): a
+// `sha-<short-sha>` build, or a bare dated/semver-shaped release alias such as
+// `2026.09.11.1` or `1.2.3`. `latest`, `main` and anything empty are
+// floating, not pins.
+const IMMUTABLE_GATEWAY_PIN = /:(sha-[0-9a-f]{7,40}|\d+(?:\.\d+)+)$/;
 
 /**
  * A literal, escaped for use inside a RegExp.
@@ -205,6 +224,54 @@ describe('the connector pin', () => {
     assert.match(compose, /\.\/connector\.toml:\/app\/config\/connector\.toml:ro/);
     const connectorBlock = compose.slice(compose.indexOf('  connector:'), compose.indexOf('  nginx:'));
     assert.doesNotMatch(connectorBlock, /^\s+build:/m);
+  });
+});
+
+describe('the gateway pin', () => {
+  it('agrees with the connector pin about what counts as immutable', () => {
+    // The predicate above must not be so loose it would wave a floating alias
+    // through, nor so strict it would reject the placeholder this bundle
+    // actually ships — that would mean the shape check and the real pin
+    // disagree about what a pin is. Checked against full pin-shaped strings,
+    // the same way IMMUTABLE_PIN above is checked against CONNECTOR_PIN.
+    assert.match('ghcr.io/toon-protocol/gateway:sha-f278cd6', IMMUTABLE_GATEWAY_PIN);
+    assert.match('ghcr.io/toon-protocol/gateway:2026.09.11.1', IMMUTABLE_GATEWAY_PIN);
+    assert.match('ghcr.io/toon-protocol/gateway:1.2.3', IMMUTABLE_GATEWAY_PIN);
+    assert.doesNotMatch('ghcr.io/toon-protocol/gateway:main', IMMUTABLE_GATEWAY_PIN);
+    assert.doesNotMatch('ghcr.io/toon-protocol/gateway:latest', IMMUTABLE_GATEWAY_PIN);
+    assert.doesNotMatch('ghcr.io/toon-protocol/gateway', IMMUTABLE_GATEWAY_PIN);
+  });
+
+  it('is an immutable build, in shape', () => {
+    // Not the connector's literal-value assertion above: no real tag has been
+    // published yet (see the comment on GATEWAY_PIN), so this checks the
+    // SHAPE of the pin this bundle actually ships.
+    assert.match(GATEWAY_PIN, IMMUTABLE_GATEWAY_PIN);
+    assert.match(compose, new RegExp(`image:\\s*${rx(GATEWAY_PIN)}\\s*$`, 'm'));
+  });
+
+  it('appears exactly once in docker-compose.yml, and nowhere else in the bundle', () => {
+    const pins = [...compose.matchAll(/^\s*image:\s*ghcr\.io\/toon-protocol\/gateway:\S+\s*$/gm)];
+    assert.equal(pins.length, 1, `expected exactly one gateway image: line, found ${pins.length}`);
+
+    const elsewhere = ['connector.toml.template', 'nginx/node.conf.template', 'auto-apply.sh', 'render.sh', 'bootstrap.sh'];
+    for (const name of elsewhere) {
+      assert.doesNotMatch(
+        read(name),
+        /ghcr\.io\/toon-protocol\/gateway:/,
+        `${name} names a gateway build; the pin belongs in docker-compose.yml alone`,
+      );
+    }
+  });
+
+  it('never follows a moving tag', () => {
+    assert.doesNotMatch(compose, /toon-protocol\/gateway:(main|latest|release)\b/);
+  });
+
+  it('replaces the build step entirely — no `build:` left for the gateway service', () => {
+    const gatewayBlock = compose.slice(compose.indexOf('  gateway:'), compose.indexOf('  connector:'));
+    assert.doesNotMatch(gatewayBlock, /^\s+build:/m, 'gateway was supposed to be pinned by image, not built');
+    assert.match(gatewayBlock, /^\s*image:\s*ghcr\.io\/toon-protocol\/gateway:/m);
   });
 });
 

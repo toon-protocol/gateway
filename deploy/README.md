@@ -275,21 +275,23 @@ Handover to `<ILP_ADDRESS>.handover` at this edge
 ## How updates arrive
 
 The box follows a branch. Every five minutes `toon-auto-apply.timer` runs
-`auto-apply.sh`, which fast-forwards the checkout, re-renders the config,
-rebuilds the gateway image, brings the stack up, and then **verifies** — the
-gateway and the connector must both report healthy, and the running connector's
-`GET /ilp` must advertise exactly what the rendered config says it should.
+`auto-apply.sh`, which fast-forwards the checkout, re-renders the config, pulls
+both images, brings the stack up, and then **verifies** — the gateway and the
+connector must both report healthy, and the running connector's `GET /ilp`
+must advertise exactly what the rendered config says it should.
 
 It refuses rather than guesses: a dirty working tree stops it loudly, only a
-fast-forward is ever applied, and a box that comes back unhealthy exits
-non-zero so `systemctl status` and the journal show it.
+fast-forward is ever applied, a pull that fails fails the whole apply rather
+than leaving a stale container running, and a box that comes back unhealthy
+exits non-zero so `systemctl status` and the journal show it.
 
-This bundle has **no Watchtower**, unlike the store and relay boxes. Those run
-a published image on a moving `:release` tag; this repository publishes no
-image yet, so the gateway is built from the checkout and the update path is the
-git one — app and config together, in one reviewed commit. Adding a
-`publish-gateway-image.yml` and switching to a pinned image is a clean
-follow-up; nothing else here would change.
+This bundle has **no Watchtower**, same as the store and relay boxes and for
+the same reason: `gateway` and `connector` are both published images pinned by
+an immutable tag (`.github/workflows/publish-gateway-image.yml`,
+TOON_Network#155), and a Watchtower has nothing to follow a pin that only ever
+moves by a reviewed commit — the box no longer compiles or builds anything
+locally either way. See "Bumping the connector pin" below; the gateway pin is
+bumped the same way, in `docker-compose.yml`'s `gateway.image` line.
 
 ```bash
 systemctl status toon-auto-apply.timer
