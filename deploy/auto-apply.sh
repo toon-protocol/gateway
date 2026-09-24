@@ -27,10 +27,11 @@
 #
 # Both `gateway` and `connector` are published images now (TOON_Network#155),
 # pulled by the immutable pin `docker-compose.yml` names -- neither is built
-# from this checkout any more. What this script fast-forwards is still the
-# whole repository, because the RENDERED CONFIG (connector.toml and friends)
-# still lives here and still needs render.sh and a restart to take effect; only
-# the image build fell away.
+# from this checkout once the gateway pin names a published build (until then
+# pull-images.sh builds it here, below). What this script fast-forwards is
+# still the whole repository, because the RENDERED CONFIG (connector.toml and
+# friends) still lives here and still needs render.sh and a restart to take
+# effect.
 set -euo pipefail
 
 REPO_DIR=$(cd "$(dirname "$0")/.." && pwd)
@@ -126,12 +127,13 @@ COMPOSE=(-f docker-compose.yml)
 # second time for the same change.
 CONNECTOR_BEFORE_UP=$(docker compose "${COMPOSE[@]}" ps -q connector || true)
 
-# A plain pull, no `--ignore-buildable`/`--ignore-pull-failures`: every service
-# is now a published image (TOON_Network#155), so nothing here is buildable and
-# a pull that fails is a real problem (a bad pin, an unpublished tag, GHCR
-# unreachable) that should fail this apply loudly, not paper over it and bring
-# up a stale container.
-docker compose "${COMPOSE[@]}" pull
+# Every service is a published image (TOON_Network#155), pulled by the pin
+# docker-compose.yml names. No `--ignore-*` flags: a pull that fails is a real
+# problem (a bad pin, an unpublished tag, GHCR unreachable) and this fails
+# loudly on it rather than bring up a stale container. The one exception is
+# pull-images.sh's: while the gateway pin is still the sha-0000000
+# placeholder, that image is built from the checkout just fast-forwarded.
+./pull-images.sh
 docker compose "${COMPOSE[@]}" up -d
 
 # A service must reach `healthy`. Docker resets Health.Status to `starting` on

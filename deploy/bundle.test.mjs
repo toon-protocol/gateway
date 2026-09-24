@@ -210,7 +210,7 @@ describe('the connector pin', () => {
   });
 
   it('is written in docker-compose.yml and nowhere else in the bundle', () => {
-    const elsewhere = ['connector.toml.template', 'nginx/node.conf.template', 'auto-apply.sh', 'render.sh', 'bootstrap.sh'];
+    const elsewhere = ['connector.toml.template', 'nginx/node.conf.template', 'auto-apply.sh', 'render.sh', 'bootstrap.sh', 'pull-images.sh'];
     for (const name of elsewhere) {
       assert.doesNotMatch(read(name), /rust-sha-|rust-main|rust-release|rust-\d{4}\.\d{2}\.\d{2}\.\d+/, `${name} names a connector build`);
     }
@@ -254,7 +254,7 @@ describe('the gateway pin', () => {
     const pins = [...compose.matchAll(/^\s*image:\s*ghcr\.io\/toon-protocol\/gateway:\S+\s*$/gm)];
     assert.equal(pins.length, 1, `expected exactly one gateway image: line, found ${pins.length}`);
 
-    const elsewhere = ['connector.toml.template', 'nginx/node.conf.template', 'auto-apply.sh', 'render.sh', 'bootstrap.sh'];
+    const elsewhere = ['connector.toml.template', 'nginx/node.conf.template', 'auto-apply.sh', 'render.sh', 'bootstrap.sh', 'pull-images.sh'];
     for (const name of elsewhere) {
       assert.doesNotMatch(
         read(name),

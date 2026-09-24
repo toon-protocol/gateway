@@ -14,7 +14,8 @@ One host, four containers, one wildcard certificate.
 
 * `nginx` — the public TLS edge. The only container bound to a public port.
 * `certbot` — issues and renews **one** certificate, over **DNS-01**.
-* `gateway` — this repository, built from the checkout the box follows.
+* `gateway` — this repository, as the image `publish-gateway-image.yml`
+  publishes to GHCR, pulled by an immutable pin.
 * `connector` — the gateway's own payment proxy (ADR 0013). It unseals a
   Gateway Handover and forwards it to the gateway's door.
 
@@ -26,10 +27,11 @@ One host, four containers, one wildcard certificate.
 | `certbot/<provider>.py` | The DNS-01 auth and cleanup hooks, one file per DNS provider: `porkbun.py`, `cloudflare.py`. No plugin, no image of our own. |
 | `render.sh` | Renders the above from `.env`, and refuses a `.env` that would render something wrong. Idempotent. |
 | `bootstrap.sh` | Fresh host → running box. Idempotent. |
+| `pull-images.sh` | Gets the pinned images onto the box: pulls them, or builds the gateway from the checkout while its pin is still the `sha-0000000` placeholder. |
 | `init-letsencrypt.sh` | Issues or reuses the certificate. Idempotent. |
 | `auto-apply.sh` + the two units | The box half of GitOps: follow the branch, apply what merged. |
 | `.env.example` | Every variable, with what it is and how to generate it. |
-| `bundle.test.mjs`, `render.test.mjs`, `dns01.test.mjs` | The guard: the real files above, `render.sh` run for real, and the DNS hooks against a stub API. `npm run test:deploy`. |
+| `bundle.test.mjs`, `render.test.mjs`, `dns01.test.mjs`, `pull-images.test.mjs` | The guard: the real files above, `render.sh` run for real, the DNS hooks against a stub API, and `pull-images.sh` against a stub `docker`. `npm run test:deploy`. |
 | `testdata/` | What the devnet box rendered before its values moved to `.env`; `render.test.mjs` holds the devnet preset to it byte for byte. |
 
 `.env`, the rendered `connector.toml`, `operator-bearer.token`,
@@ -199,7 +201,7 @@ is a lost gateway.
 
 That hardens the firewall, installs Docker, writes the internal certificate,
 renders the config (refusing, by name, anything in `.env` that is missing or
-the wrong shape), builds and starts the four containers, requests a
+the wrong shape), pulls and starts the four containers, requests a
 certificate, and enables the auto-apply timer. It is idempotent — re-run it to
 reconcile a box.
 
@@ -289,9 +291,17 @@ This bundle has **no Watchtower**, same as the store and relay boxes and for
 the same reason: `gateway` and `connector` are both published images pinned by
 an immutable tag (`.github/workflows/publish-gateway-image.yml`,
 TOON_Network#155), and a Watchtower has nothing to follow a pin that only ever
-moves by a reviewed commit — the box no longer compiles or builds anything
-locally either way. See "Bumping the connector pin" below; the gateway pin is
-bumped the same way, in `docker-compose.yml`'s `gateway.image` line.
+moves by a reviewed commit. See "Bumping the connector pin" below; the gateway
+pin is bumped the same way, in `docker-compose.yml`'s `gateway.image` line.
+
+**The placeholder pin.** Until that workflow has published its first
+`sha-<short>`, the `gateway` pin reads `sha-0000000`, git's all-zero "no
+commit", which no registry has. Every pull goes through `pull-images.sh`, and
+for that one tag, and only for the gateway image, it builds the image from the
+checkout's `Dockerfile` and tags it with the pinned name, so compose finds it
+locally and never asks GHCR. Any other pin that will not pull still fails the
+apply. The first real pin bump ends this without anything on the box changing:
+the next fast-forward pulls it like any other.
 
 ```bash
 systemctl status toon-auto-apply.timer

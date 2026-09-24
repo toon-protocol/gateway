@@ -72,9 +72,11 @@ chmod 644 tls/internal.crt
 echo "==> [5/8] Render config"
 ./render.sh
 
-echo "==> [6/8] Build and start"
-docker compose pull --ignore-buildable --ignore-pull-failures
-docker compose build
+echo "==> [6/8] Pull and start"
+# Every image is a pin. pull-images.sh pulls them all, and fails on a pin that
+# will not pull, except the sha-0000000 placeholder, which it builds from this
+# checkout instead (README § "How updates arrive").
+./pull-images.sh
 docker compose up -d
 
 echo "==> [7/8] TLS"
