@@ -257,15 +257,15 @@ docker compose ps                              # four services; gateway and conn
 
 # the sealing key a tenant pins — 200 only once the connector is serving AND
 # has read its signer key file, which "Up" alone does not prove
-curl https://proxy.gateway.<domain>/ilp/identity
+curl https://<EDGE_HOST>/ilp/identity
 
 # the self-description: the one route, its price of 0, and the settlement
 # addresses a tenant opens a channel against
-curl https://proxy.gateway.<domain>/ilp
+curl https://<EDGE_HOST>/ilp
 
 # a hostname this gateway holds no grant for. 503 with this header is the
 # healthy, empty state — it means the gateway answered and dialled nothing.
-curl -i https://anything.<gateway domain>/ | grep toon-gateway-reason
+curl -i https://anything.<GATEWAY_DOMAIN>/ | grep toon-gateway-reason
 # toon-gateway-reason: no_grant
 ```
 
