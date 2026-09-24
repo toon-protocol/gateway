@@ -23,7 +23,7 @@ re-runs them unattended — which is the whole point: a wildcard has to be
 renewed the same way it was issued, and nobody is here to edit DNS by hand
 every sixty days.
 
-Environment (docker-compose.yml passes all three from .env):
+Environment (render.sh passes every PORKBUN_* line of .env, via dns-01.env):
   PORKBUN_API_KEY     the API key
   PORKBUN_SECRET_KEY  its secret half
   PORKBUN_ZONE        the REGISTERED domain, e.g. `toonprotocol.dev`. Porkbun's

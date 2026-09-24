@@ -12,9 +12,10 @@
 #
 # Unlike every other bundle in this fleet, this one does NOT need DNS to point
 # at the box first — DNS-01 proves control of the zone, not of the host. It
-# does need PORKBUN_API_KEY, PORKBUN_SECRET_KEY and PORKBUN_ZONE in .env, and
-# it does need nginx able to start (the dummy certificate below is what lets it
-# start before there is a real one).
+# does need DNS_PROVIDER and that provider's credentials in .env (rendered into
+# dns-01.env by ./render.sh, which must have run), and it does need nginx able
+# to start (the dummy certificate below is what lets it start before there is a
+# real one).
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -22,13 +23,24 @@ set -a; . ./.env; set +a
 : "${GATEWAY_DOMAIN:?set GATEWAY_DOMAIN in .env}"
 : "${EDGE_HOST:?set EDGE_HOST in .env}"
 : "${LETSENCRYPT_EMAIL:?set LETSENCRYPT_EMAIL in .env}"
-: "${PORKBUN_ZONE:?set PORKBUN_ZONE in .env}"
+: "${DNS_PROVIDER:?set DNS_PROVIDER in .env}"
+[ -f "certbot/${DNS_PROVIDER}.py" ] || { echo "DNS_PROVIDER=${DNS_PROVIDER}: no certbot/${DNS_PROVIDER}.py" >&2; exit 1; }
+[ -f dns-01.env ] || { echo "Missing dns-01.env — run ./render.sh first." >&2; exit 1; }
 
 DC=(docker compose)
 DOMAINS=("${GATEWAY_DOMAIN}" "*.${GATEWAY_DOMAIN}" "${EDGE_HOST}")
 CERT_NAME="${CERT_NAME:-${GATEWAY_DOMAIN}}"
 CERT_PATH="/etc/letsencrypt/live/${CERT_NAME}"
 RENEW_WINDOW_DAYS="${RENEW_WINDOW_DAYS:-30}"
+
+# The hook interface (README.md § "DNS-01"): `python3 <hook> auth|cleanup`,
+# with certbot's CERTBOT_DOMAIN and CERTBOT_VALIDATION and the hook's own
+# <PROVIDER>_* credentials in the environment. These two strings are exactly
+# what certbot stores in the lineage's renewal configuration — with
+# DNS_PROVIDER=porkbun they are byte-for-byte the commands the devnet box's
+# existing lineage was issued with, so its renewals carry on untouched.
+AUTH_HOOK="python3 /opt/hooks/${DNS_PROVIDER}.py auth"
+CLEANUP_HOOK="python3 /opt/hooks/${DNS_PROVIDER}.py cleanup"
 
 seed_dummy() {
   "${DC[@]}" run --rm --entrypoint sh certbot -c "
@@ -56,6 +68,12 @@ existing_cert_ok() {
     is_staging=0
     printf "%s" "$issuer" | grep -qi "STAGING\|Fake LE" && is_staging=1
     [ "$is_staging" = "'"${want_staging}"'" ] || exit 0
+    # A lineage renews with the hook it was ISSUED with, which certbot wrote
+    # into its renewal configuration. After DNS_PROVIDER changes, a lineage
+    # still naming the old hook would fail its next unattended renewal — the
+    # old provider'"'"'s credentials are gone from the container — so it is
+    # re-issued now, with the new hook, while somebody is watching.
+    grep -qxF "manual_auth_hook = '"${AUTH_HOOK}"'" "/etc/letsencrypt/renewal/'"${CERT_NAME}"'.conf" 2>/dev/null || exit 0
     san="$(openssl x509 -ext subjectAltName -noout -in "$CERT" 2>/dev/null || openssl x509 -text -noout -in "$CERT")"
     san="$(printf "%s" "$san" | tr "," "\n" | tr -d " " | sed "s/\$/,/")"
     while IFS= read -r d; do
@@ -88,16 +106,17 @@ staging_arg=""
 [ "${LETSENCRYPT_STAGING:-1}" = "1" ] && staging_arg="--staging"
 
 # `--manual` with hooks, not a DNS plugin: see certbot/porkbun.py for why.
+# Which hook is DNS_PROVIDER's choice, and nothing here names a provider.
 # `--manual-public-ip-logging-ok` is not passed and is not needed — no IP is
 # logged by a DNS challenge. certbot stores both hook commands in the renewal
 # configuration, so the unattended `certbot renew` loop in docker-compose.yml
 # renews this the same way it was issued.
-echo "==> Requesting a certificate over DNS-01 (${staging_arg:-production})"
+echo "==> Requesting a certificate over DNS-01 via ${DNS_PROVIDER} (${staging_arg:-production})"
 echo "    ${DOMAINS[*]}"
 if "${DC[@]}" run --rm --entrypoint certbot certbot \
   certonly --manual --preferred-challenges dns \
-  --manual-auth-hook    'python3 /opt/hooks/porkbun.py auth' \
-  --manual-cleanup-hook 'python3 /opt/hooks/porkbun.py cleanup' \
+  --manual-auth-hook    "${AUTH_HOOK}" \
+  --manual-cleanup-hook "${CLEANUP_HOOK}" \
   $staging_arg \
   --cert-name "${CERT_NAME}" \
   "${d_args[@]}" \
@@ -116,8 +135,9 @@ if "${DC[@]}" run --rm --entrypoint certbot certbot \
   echo "Done.${staging_arg:+ STAGING certificate — re-run with LETSENCRYPT_STAGING=0 once you are happy.}"
 else
   echo "::warning:: Certificate issuance failed."
-  echo "  A DNS-01 failure is almost always the Porkbun credentials or PORKBUN_ZONE:"
-  echo "  the zone must be the REGISTERED domain (${PORKBUN_ZONE}), not a subdomain."
+  echo "  A DNS-01 failure is almost always the ${DNS_PROVIDER} credentials or zone in .env"
+  echo "  (the zone is the REGISTERED domain, not a subdomain). After changing .env,"
+  echo "  re-run ./render.sh, and \`docker compose up -d certbot\` so renewals see it too."
   echo "  The certbot log above names the call that failed."
   seed_dummy
   "${DC[@]}" exec nginx nginx -s reload 2>/dev/null || true

@@ -23,17 +23,19 @@ One host, four containers, one wildcard certificate.
 | `docker-compose.yml` | The four services. The connector's pin lives here and nowhere else. |
 | `connector.toml.template` | The connector's whole configuration. Rendered; names key paths, holds no secret. |
 | `nginx/node.conf.template` | The two server blocks. Rendered. |
-| `certbot/porkbun.py` | The DNS-01 auth and cleanup hooks. No plugin, no image of our own. |
-| `render.sh` | Renders the above from `.env`. Idempotent. |
+| `certbot/<provider>.py` | The DNS-01 auth and cleanup hooks, one file per DNS provider: `porkbun.py`, `cloudflare.py`. No plugin, no image of our own. |
+| `render.sh` | Renders the above from `.env`, and refuses a `.env` that would render something wrong. Idempotent. |
 | `bootstrap.sh` | Fresh host → running box. Idempotent. |
 | `init-letsencrypt.sh` | Issues or reuses the certificate. Idempotent. |
 | `auto-apply.sh` + the two units | The box half of GitOps: follow the branch, apply what merged. |
 | `.env.example` | Every variable, with what it is and how to generate it. |
-| `bundle.test.mjs` | The guard. Reads the real files above; `npm run test:deploy`. |
+| `bundle.test.mjs`, `render.test.mjs`, `dns01.test.mjs` | The guard: the real files above, `render.sh` run for real, and the DNS hooks against a stub API. `npm run test:deploy`. |
+| `testdata/` | What the devnet box rendered before its values moved to `.env`; `render.test.mjs` holds the devnet preset to it byte for byte. |
 
 `.env`, the rendered `connector.toml`, `operator-bearer.token`,
-`operator-write.keys`, `nginx/conf.d/`, `tls/` and all key material are
-gitignored. **Only templates are committed.**
+`operator-write.keys`, `dns-01.env`, `nginx/conf.d/`, `tls/` and all key
+material are gitignored. **Only templates are committed, and an operator edits
+none of them**: everything that makes a box yours is in `.env`.
 
 ## Two names, and why they are not one
 
@@ -67,20 +69,60 @@ serves are decided by tenants after the certificate was issued. Let's Encrypt
 issues a wildcard over **DNS-01 only**, so `certbot` here writes a TXT record
 in the zone instead of serving a file.
 
-It does that with `certbot/porkbun.py` — two Porkbun API calls in plain
+It does that with a **hook**: a small script under `certbot/`, in plain
 `python3`, which the stock `certbot/certbot` image already has. No plugin is
-baked in and no image of our own is published, pinned or rebuilt for two HTTP
-requests. certbot records the hook commands in the renewal configuration, so
+baked in and no image of our own is published, pinned or rebuilt for a few
+HTTP requests. `DNS_PROVIDER` in `.env` picks the hook, and two ship:
+
+| `DNS_PROVIDER` | Hook | Its lines in `.env` |
+|---|---|---|
+| `porkbun` | `certbot/porkbun.py` | `PORKBUN_ZONE`, `PORKBUN_API_KEY`, `PORKBUN_SECRET_KEY` |
+| `cloudflare` | `certbot/cloudflare.py` | `CLOUDFLARE_ZONE`, `CLOUDFLARE_API_TOKEN` (an API token from the "Edit zone DNS" template, scoped to the zone), optionally `CLOUDFLARE_ZONE_ID` |
+
+The zone is always the **registered** domain: `gw.example.com` is not a zone,
+`example.com` is. DNS does **not** have to point at the box before the
+certificate is issued — DNS-01 proves control of the zone, not of the host.
+
+certbot records the hook commands in the lineage's renewal configuration, so
 the unattended `certbot renew` loop renews the wildcard exactly the way it was
-issued.
+issued. If you change `DNS_PROVIDER` later, re-run `./render.sh`,
+`docker compose up -d certbot` and `./init-letsencrypt.sh`: it sees the
+lineage still names the old hook and re-issues it with the new one, rather
+than leaving a renewal to fail two months later.
 
-The practical consequences:
+### Adding a DNS provider
 
-* the box needs `PORKBUN_API_KEY`, `PORKBUN_SECRET_KEY` and `PORKBUN_ZONE`;
-* `PORKBUN_ZONE` is the **registered** domain — Porkbun's API is addressed by
-  zone, and `gw.devnet.toonprotocol.dev` is not one;
-* DNS does **not** have to point at the box before the certificate is issued.
-  DNS-01 proves control of the zone, not of the host.
+A new provider is **one new file**, `certbot/<name>.py`, plus its lines in
+your `.env`. Nothing in `render.sh`, `init-letsencrypt.sh` or
+`docker-compose.yml` names a provider, so none of them changes. The interface
+is fixed:
+
+* **Invoked as** `python3 /opt/hooks/<name>.py auth` and
+  `python3 /opt/hooks/<name>.py cleanup`, inside the stock `certbot/certbot`
+  image. Standard library only — there is nothing to install into.
+* **certbot supplies** `CERTBOT_DOMAIN` (the base name, never the `*.` form)
+  and `CERTBOT_VALIDATION` (the value to publish).
+* **Its credentials** are variables named `<NAME>_*` — the file name upper
+  cased, `-` as `_`. `render.sh` copies exactly those lines of `.env`, and
+  `DNS_PROVIDER`, into `dns-01.env` (0600, gitignored), which is the certbot
+  container's whole environment from `.env`. It never sees the operator bearer
+  token.
+* **`auth`** publishes a TXT record at `_acme-challenge.$CERTBOT_DOMAIN`, waits
+  until public DNS answers with it, and exits 0; it exits non-zero, naming the
+  call that failed, if it cannot publish. It remembers the record's id under
+  `/etc/letsencrypt/<name>-dns01/`: a certificate for `x` and `*.x` runs `auth`
+  twice for **one** record name, and both tokens must be live at once.
+* **`cleanup`** deletes exactly the records its `auth` created, by id, and
+  treats "nothing recorded" as nothing to do — certbot runs it after a failed
+  `auth` too.
+* **It never prints a credential**, including inside an exception's text.
+* **It imports nothing from another hook.** certbot stores the command in the
+  renewal configuration for the life of the lineage, so each hook must keep
+  working on its own.
+
+`porkbun.py` and `cloudflare.py` are both complete examples, and
+`dns01.test.mjs` shows how to test one against a stub of the provider's API
+without touching a real zone.
 
 ## The internal TLS hop
 
@@ -104,18 +146,27 @@ expiring it would be a scheduled outage bought for nothing.
 
 ## Standing one up
 
-**Before you start** you need a host, the three DNS A-records above, Porkbun
-API credentials, and three key files.
+**Before you start** you need a host, the three DNS A-records above, API
+credentials for the DNS provider that holds your zone (§ "DNS-01"), and three
+key files.
 
-**1. Clone and configure.**
+**1. Clone and configure.** Clone `main` and leave the checkout exactly as it
+is: `auto-apply.sh` keeps the box up to date by fast-forwarding it, and stops
+on a dirty tree. Everything that is yours goes in `.env`, which is
+gitignored.
 
 ```bash
 git clone https://github.com/toon-protocol/gateway /root/gateway
 cd /root/gateway/deploy
-git checkout <the branch this box follows>
 cp .env.example .env
 $EDITOR .env          # every variable is documented in the file
 ```
+
+Fill in `ILP_ADDRESS`, `GATEWAY_DOMAIN`, `EDGE_HOST`, `DNS_PROVIDER` and that
+provider's lines, and the two operator credentials. The relay and settlement
+block is the **devnet preset**: leave it to front workloads on the TOON
+devnet, which settles in mock USDC. See § "Make it yours" for what each value
+decides.
 
 **2. Generate the key material.** Three files, all `0600`, none of them ever
 committed. Each is 32 bytes as 64 hex characters — the only format the
@@ -147,7 +198,8 @@ is a lost gateway.
 ```
 
 That hardens the firewall, installs Docker, writes the internal certificate,
-renders the config, builds and starts the four containers, requests a
+renders the config (refusing, by name, anything in `.env` that is missing or
+the wrong shape), builds and starts the four containers, requests a
 certificate, and enables the auto-apply timer. It is idempotent — re-run it to
 reconcile a box.
 
@@ -161,19 +213,23 @@ re-run `./init-letsencrypt.sh`.
 The handover route is free, so this node never charges anybody. It still needs
 two funded settlement identities, for two different reasons.
 
+The chains are whichever the `SETTLEMENT_*` lines of `.env` name. What
+follows is written for the devnet preset — Base Sepolia and Solana devnet —
+and holds the same way on any other chain, with that chain's own money.
+
 **Solana — required to boot.** `SolanaSettlementBackend::connect` submits and
 confirms a real transaction at startup (an idempotent associated-token-account
 create), paid by this key. An unfunded key is a refuse-to-start and the
-container restart-loops. **1–2 devnet SOL is plenty**; get it from
-<https://faucet.solana.com>.
+container restart-loops. On the devnet preset **1–2 devnet SOL is plenty**;
+get it from <https://faucet.solana.com>.
 
-**EVM — not needed to boot.** Base Sepolia boot is read-only: chain id, the
+**EVM — not needed to boot.** Boot on the EVM chain is read-only: chain id, the
 token network resolved through the registry, and the token's own `decimals()`.
 The key needs ETH only when it transacts — a redeem, say. Nothing on this box
 checks a balance, so under-funding surfaces as an ordinary settlement error
 later, never at load time.
 
-Neither key needs USDC. Money flows *to* a gateway's connector only if someone
+Neither key needs the settlement token. Money flows *to* a gateway's connector only if someone
 prices its route, and nobody does.
 
 Print the two addresses from the key files:
@@ -212,7 +268,8 @@ curl -i https://anything.<gateway domain>/ | grep toon-gateway-reason
 ```
 
 To prove the whole path, spawn a workload on a provider and seal a Gateway
-Handover to `g.toon.workload-gateway.handover` at this edge. The tenant tool is
+Handover to `<ILP_ADDRESS>.handover` at this edge
+(`g.toon.workload-gateway.handover` on the devnet box). The tenant tool is
 `tools/grant` in the provider repository.
 
 ## How updates arrive
@@ -291,11 +348,33 @@ own Profile says it is.
 
 ## Make it yours
 
-Most of `connector.toml.template` describes any Workload Gateway behind any
-connector. The part specific to the TOON devnet is fenced under **"THIS
-DEPLOYMENT"** at the bottom — the `[node]` addresses and public URLs.
+You make this box yours in `.env` and nowhere else. The committed files stay
+exactly as they are on `main`, which is what lets `auto-apply.sh` keep
+fast-forwarding you onto every reviewed change — it stops on a dirty tree, and
+a box on a fork of these files is a box that has stopped getting updates.
 
-Point the settlement sections at whatever chain and token you settle in,
-generate your own `signer.key`, put your own names in `.env`, and the rest of
-this directory works unchanged. If your DNS is not Porkbun, `certbot/porkbun.py`
-is the one file to replace: it is two API calls behind a fixed hook interface.
+What each part of `.env` decides:
+
+* **`ILP_ADDRESS`** — this gateway's own address. The connector's `[node]`
+  answers for it and the one route it terminates is `<ILP_ADDRESS>.handover`,
+  both rendered from this one value so they cannot disagree. There is no
+  default. Pick one of your own, such as `g.<your-name>.workload-gateway`:
+  `render.sh` refuses anything under `g.toon.`, which is the TOON fleet's own
+  namespace. (The devnet box sets `TOON_DEVNET_BOX=1` to use
+  `g.toon.workload-gateway`; nobody else should.)
+* **`GATEWAY_DOMAIN` and `EDGE_HOST`** — your two names, § "Two names".
+* **`DNS_PROVIDER`** and its lines — how the wildcard is proved, § "DNS-01".
+  If your provider is not shipped, it is one new file (§ "Adding a DNS
+  provider"); send it upstream and the next operator on that provider gets it
+  for free.
+* **The devnet preset** — `GATEWAY_RELAYS` and the `SETTLEMENT_*` lines. Keep
+  them to front workloads on the TOON devnet. To run on another network,
+  replace the block as a whole: the relay, each chain's RPC, its registry or
+  program, and its token are facts about that network, and the connector
+  checks each against the live chain at boot.
+* **Your keys** — `signer.key` and the two settlement keys, § "Standing one
+  up". They are files beside `.env`, gitignored the same way.
+
+`connector.toml.template` still reads top to bottom as the whole of the
+connector's configuration: its values are `${VARIABLES}` from `.env`, and its
+`#:` lines are notes on the template that `render.sh` drops.
