@@ -20,6 +20,73 @@ nothing and publishes nothing.** Its whole authority is the **Gateway Grant**
 admits it to one workload's `status` until a moment the tenant chose, and to
 nothing else.
 
+## Run a gateway
+
+**You probably do not need to.** A gateway is optional and separate from
+running a provider. A provider needs none, and the devnet's own gateway, at
+`*.gw.devnet.toonprotocol.dev`, can already front a workload on any devnet
+provider. Run your own to serve workloads under a domain of yours. It serves
+only the workloads a tenant hands over to it.
+
+A gateway is four services on one host: this process, its own TOON
+connector, nginx and certbot. [`deploy/`](deploy/) runs all four, and
+[its README](deploy/README.md) has the detail behind each step below.
+
+**This is the TOON devnet.** The bundle's relay and settlement block is the
+devnet preset, which settles in mock USDC on Base Sepolia and Solana devnet
+(<https://faucet.devnet.toonprotocol.dev>). A gateway needs none of it: its
+one route is free, so it is never paid and never pays.
+
+**You need** an Ubuntu host you are root on, with a public IPv4 and inbound
+TCP 22, 80 and 443 (`bootstrap.sh` opens them in ufw, but a cloud firewall is
+yours to open). You need a domain in a DNS zone you control, with three
+A-records at the box: your gateway domain, a wildcard under it, and an edge
+host *beside* it (for example `gw.example.com`, `*.gw.example.com` and
+`proxy.gateway.example.com`)
+([why two names](deploy/README.md#two-names-and-why-they-are-not-one)). You
+need API credentials for that zone at Porkbun or Cloudflare, which certbot
+uses to prove the wildcard ([adding another DNS provider is one
+file](deploy/README.md#adding-a-dns-provider)). And you need 1–2 devnet SOL
+for the connector's Solana settlement key.
+
+1. Clone to `/root/gateway` (the auto-apply unit runs from there), then
+   `cd /root/gateway/deploy` and `cp .env.example .env`. In `.env` set an
+   `ILP_ADDRESS` of your own such as `g.<your-name>.workload-gateway`, then
+   `GATEWAY_DOMAIN`, `EDGE_HOST`, `LETSENCRYPT_EMAIL`, `DNS_PROVIDER` and
+   that provider's lines, and `OPERATOR_BEARER_TOKEN` and
+   `OPERATOR_WRITE_KEY` as the file describes. Leave the relay and settlement
+   block as the devnet preset.
+2. Generate the keys: `openssl rand -hex 32 > <file>` for `signer.key`,
+   `settlement.key` and `settlement-solana.key`, then `chmod 600 *.key`. Keep
+   a copy of `signer.key` off the box. Tenants seal to it, so it *is* your
+   gateway.
+3. [Fund the Solana settlement key](deploy/README.md#funding) with devnet SOL
+   from <https://faucet.solana.com>. The connector will not start without it.
+   The EVM key needs nothing to boot.
+4. Run `./bootstrap.sh`. It installs Docker, writes the internal
+   certificate, renders the config, pulls and starts the four services,
+   requests a Let's Encrypt *staging* certificate over DNS-01, and installs
+   the timer that keeps the box on `main`.
+5. If step 4 printed `Done. STAGING certificate` rather than
+   `Certificate issuance failed`, set `LETSENCRYPT_STAGING=0` in `.env` and
+   run `./init-letsencrypt.sh` for the real certificate.
+
+Then [check it works](deploy/README.md#checking-it-works):
+
+```bash
+curl -i https://anything.<GATEWAY_DOMAIN>/   # 503, toon-gateway-reason: no_grant
+curl https://<EDGE_HOST>/ilp/identity        # the sealing key tenants pin
+```
+
+`no_grant` is the healthy, empty state: the gateway answered and holds
+nothing yet. A tenant uses your gateway by sealing a Gateway Handover to
+`<ILP_ADDRESS>.handover` at `https://<EDGE_HOST>/ilp`.
+
+The gateway image is pinned to a commit, `sha-<short>`. Until the first image
+is published, the pin is the placeholder `sha-0000000`, and `pull-images.sh`
+builds the image on the box instead
+([How updates arrive](deploy/README.md#how-updates-arrive)).
+
 ## How a workload arrives here
 
 A tenant seals **one packet** to this gateway's connector: a **Gateway
@@ -361,62 +428,40 @@ A half-configured gateway is worse than one that will not start: it answers a
 tenant's hostname with nothing, and nothing is exactly what a stopped workload
 and a broken gateway look like from outside.
 
-## Running it
-
-```sh
-npm install
-
-# development: a plain listener, no certificate
-GATEWAY_DOMAIN=gw.localhost \
-GATEWAY_RELAYS=ws://localhost:7100 \
-GATEWAY_HANDOVER_PORT=8081 \
-GATEWAY_HTTP_PORT=8080 \
-npm start
-
-# production: TLS for *.gw.example
-GATEWAY_DOMAIN=gw.example \
-GATEWAY_RELAYS=wss://relay.one,wss://relay.two \
-GATEWAY_HANDOVER_PORT=8081 \
-GATEWAY_BIND_ADDR=0.0.0.0 \
-GATEWAY_TLS_CERT=/etc/tls/fullchain.pem \
-GATEWAY_TLS_KEY=/etc/tls/privkey.pem \
-npm start
-
-# fronting Hidden Providers too: .anyone hosts go through a running anon daemon
-TOON_SOCKS_PROXY=socks5h://127.0.0.1:9050 \
-GATEWAY_DOMAIN=gw.example \
-GATEWAY_RELAYS=wss://relay.one \
-GATEWAY_HANDOVER_PORT=8081 \
-GATEWAY_TLS_CERT=/etc/tls/fullchain.pem \
-GATEWAY_TLS_KEY=/etc/tls/privkey.pem \
-npm start
-```
-
-TLS is terminated here, for **this** gateway's domain, with **this** gateway's
-certificate — which is the point: a workload is reachable over HTTPS while
-holding no certificate itself, and no provider in the Standby Set ever sees a
-certificate key.
-
-### In a container
-
-`Dockerfile` builds it: `docker build -t toon-workload-gateway .`, then the
-same environment, with the certificate pair mounted wherever
-`GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY` point. The TOON sandbox
-(`infra/sandbox`, profile `gateway`) runs it this way behind its own
-connector, with a self-signed wildcard certificate and the plain listener
-beside it, and its README walks from `make up-gateway` through handing over a
-grant to a `curl` of a workload's canonical URL.
-
 ## Its own connector
 
-ADR 0013 puts a gateway behind its own connector, like any other TOON app. In
-this milestone **that connector terminates no paid route**: nothing a tenant
-asks this process for is sold, and this process buys nothing either. It holds
-no payment channel, no mnemonic and no lease, and it never calls a paid route
-— so there is no connector configuration here to get wrong. What a deployment
-puts in front of these listeners (a connector, a load balancer, nothing at
-all) is its own choice, and the plain-HTTP listener is there for the case
-where TLS is terminated ahead of this process.
+ADR 0013 puts a gateway behind its own connector, like any other TOON app, and
+[`deploy/`](deploy/) runs it: `connector` in
+[`docker-compose.yml`](deploy/docker-compose.yml), configured by
+[`connector.toml.template`](deploy/connector.toml.template), which `render.sh`
+fills from `.env`.
+
+That connector terminates **one route**, `<ILP_ADDRESS>.handover`. A Gateway
+Handover and a Gateway Withdrawal both ride it, and it forwards both to this
+process's `GATEWAY_HANDOVER_PORT` (8081). The door is published on no host
+port, so a sealed packet through the connector is the only way a tenant can
+tell this process what to serve or stop serving.
+
+**Its signer key is this gateway's identity.** A tenant seals the handover to
+the public half of `signer.key`, which the connector answers at
+`GET /ilp/identity`. The gateway process holds no key at all, so as far as a
+tenant is concerned that key *is* the gateway. Replacing it makes this a
+different gateway, and every grant already handed over stops being
+addressable.
+
+**The route is free.** It is priced `0`, so nothing a tenant asks this process
+for is sold, and this process buys nothing either: it holds no payment
+channel, no mnemonic and no lease, and it never calls a paid route. The
+connector still carries two settlement keys, for the tenant's sake: a
+connector client opens its channel against the settlement key the payee's
+`GET /ilp` reports, so a node with no settlement table has nothing to open one
+against. The Solana key needs a little SOL to boot
+([Funding](deploy/README.md#funding)).
+
+nginx fronts the connector at `EDGE_HOST` and the gateway at every name under
+`GATEWAY_DOMAIN`. The connector's own port is bound to the loopback only.
+[`deploy/README.md`](deploy/README.md) covers the rest: the pin, the operator
+surface and the exposure rules.
 
 ### How `status` is sent — read this before deploying
 
@@ -532,7 +577,58 @@ HTML page and the header all follow.
 | `src/reasons.mjs` | The `503` vocabulary. |
 | `src/kinds.mjs` | The kind numbers, pinned to the provider's fixtures by a test. |
 
-## Tests
+## Development
+
+### Running it from source
+
+This is for working on the gateway itself. A box runs the published image
+through [`deploy/`](deploy/) instead: see [Run a gateway](#run-a-gateway).
+
+```sh
+npm install
+
+# development: a plain listener, no certificate
+GATEWAY_DOMAIN=gw.localhost \
+GATEWAY_RELAYS=ws://localhost:7100 \
+GATEWAY_HANDOVER_PORT=8081 \
+GATEWAY_HTTP_PORT=8080 \
+npm start
+
+# production: TLS for *.gw.example
+GATEWAY_DOMAIN=gw.example \
+GATEWAY_RELAYS=wss://relay.one,wss://relay.two \
+GATEWAY_HANDOVER_PORT=8081 \
+GATEWAY_BIND_ADDR=0.0.0.0 \
+GATEWAY_TLS_CERT=/etc/tls/fullchain.pem \
+GATEWAY_TLS_KEY=/etc/tls/privkey.pem \
+npm start
+
+# fronting Hidden Providers too: .anyone hosts go through a running anon daemon
+TOON_SOCKS_PROXY=socks5h://127.0.0.1:9050 \
+GATEWAY_DOMAIN=gw.example \
+GATEWAY_RELAYS=wss://relay.one \
+GATEWAY_HANDOVER_PORT=8081 \
+GATEWAY_TLS_CERT=/etc/tls/fullchain.pem \
+GATEWAY_TLS_KEY=/etc/tls/privkey.pem \
+npm start
+```
+
+TLS is terminated here, for **this** gateway's domain, with **this** gateway's
+certificate — which is the point: a workload is reachable over HTTPS while
+holding no certificate itself, and no provider in the Standby Set ever sees a
+certificate key.
+
+### In a container
+
+`Dockerfile` builds it: `docker build -t toon-workload-gateway .`, then the
+same environment, with the certificate pair mounted wherever
+`GATEWAY_TLS_CERT` / `GATEWAY_TLS_KEY` point. The TOON sandbox
+(`infra/sandbox`, profile `gateway`) runs it this way behind its own
+connector, with a self-signed wildcard certificate and the plain listener
+beside it, and its README walks from `make up-gateway` through handing over a
+grant to a `curl` of a workload's canonical URL.
+
+### Tests
 
 ```sh
 npm test        # node --test
