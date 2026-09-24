@@ -82,9 +82,8 @@ curl https://<EDGE_HOST>/ilp/identity        # the sealing key tenants pin
 nothing yet. A tenant uses your gateway by sealing a Gateway Handover to
 `<ILP_ADDRESS>.handover` at `https://<EDGE_HOST>/ilp`.
 
-The gateway image is pinned to a commit, `sha-<short>`. Until the first image
-is published, the pin is the placeholder `sha-0000000`, and `pull-images.sh`
-builds the image on the box instead
+The gateway image is published to GHCR and pinned to a commit, `sha-<short>`,
+so the box pulls it and builds nothing
 ([How updates arrive](deploy/README.md#how-updates-arrive)).
 
 ## How a workload arrives here

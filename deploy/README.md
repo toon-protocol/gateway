@@ -318,14 +318,12 @@ TOON_Network#155), and a Watchtower has nothing to follow a pin that only ever
 moves by a reviewed commit. See "Bumping the connector pin" below; the gateway
 pin is bumped the same way, in `docker-compose.yml`'s `gateway.image` line.
 
-**The placeholder pin.** Until that workflow has published its first
-`sha-<short>`, the `gateway` pin reads `sha-0000000`, git's all-zero "no
-commit", which no registry has. Every pull goes through `pull-images.sh`, and
-for that one tag, and only for the gateway image, it builds the image from the
-checkout's `Dockerfile` and tags it with the pinned name, so compose finds it
-locally and never asks GHCR. Any other pin that will not pull still fails the
-apply. The first real pin bump ends this without anything on the box changing:
-the next fast-forward pulls it like any other.
+**The placeholder pin.** Before the workflow's first publish the `gateway` pin
+read `sha-0000000`, git's all-zero "no commit", which no registry has, and
+`pull-images.sh` still honours it: for that one tag, and only for the gateway
+image, it builds the image from the checkout's `Dockerfile` and tags it with
+the pinned name. That is what a fork that has not published yet can use. Any
+other pin that will not pull fails the apply.
 
 ```bash
 systemctl status toon-auto-apply.timer
