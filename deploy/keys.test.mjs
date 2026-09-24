@@ -217,7 +217,7 @@ describe('keys.sh addresses', () => {
     assert.equal(run.status, 0, run.stderr);
     assert.ok(run.stdout.includes(ED25519[0][2]), run.stdout);
     assert.ok(run.stdout.includes(EVM[0][1]), run.stdout);
-    assert.ok(run.stdout.includes('https://faucet.solana.com'));
+    assert.match(run.stdout, /Fund with: 1-2 devnet SOL, from https:\/\/faucet\.solana\.com /);
     assert.ok(!run.stdout.includes(ED25519[0][1]), 'no hex keyid is offered as an address');
     assert.ok(!run.stdout.includes('publisher'), 'a gateway has no publisher');
   });
