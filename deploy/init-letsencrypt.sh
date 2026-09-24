@@ -86,6 +86,27 @@ SANS
   ' 2>/dev/null | tr -d '[:space:]'
 }
 
+# A warning, not a gate: DNS-01 proves control of the ZONE, not of the host,
+# so this cannot stop issuance the way it does on an HTTP-01 bundle — but a
+# wildcard or edge host that does not resolve here yet means nothing will ever
+# reach this box once the certificate exists, and that is worth saying before
+# spending a rate-limit slot on it, not after.
+warn_if_dns_wrong() {
+  local mine d ip
+  mine="$(hostname -I 2>/dev/null || true)"
+  for d in "anything.${GATEWAY_DOMAIN}" "${EDGE_HOST}"; do
+    ip="$(getent ahostsv4 "$d" 2>/dev/null | awk '{print $1; exit}' || true)"
+    if [ -z "$ip" ]; then
+      echo "::warning:: ${d} does not resolve yet. The certificate will still be requested" \
+           "over DNS-01, which does not need this, but nothing will reach this gateway" \
+           "through it until the A-record (or, for the wildcard, *.${GATEWAY_DOMAIN}) points here."
+    elif [ -n "$mine" ] && ! printf '%s\n' "$mine" | tr ' ' '\n' | grep -qxF "$ip"; then
+      echo "::warning:: ${d} resolves to ${ip}, which is not one of this box's own addresses" \
+           "(${mine}). Check the A-record — DNS-01 will still issue, but the record may be wrong."
+    fi
+  done
+}
+
 echo "==> Checking for an existing valid certificate (${CERT_NAME})"
 if [ "$(existing_cert_ok)" = "ok" ]; then
   echo "==> Valid certificate found — reusing it, not re-issuing."
@@ -99,6 +120,8 @@ seed_dummy
 "${DC[@]}" up -d nginx
 "${DC[@]}" run --rm --entrypoint sh certbot -c \
   "rm -rf /etc/letsencrypt/live/${CERT_NAME} /etc/letsencrypt/archive/${CERT_NAME} /etc/letsencrypt/renewal/${CERT_NAME}.conf"
+
+warn_if_dns_wrong
 
 d_args=()
 for d in "${DOMAINS[@]}"; do d_args+=(-d "$d"); done
@@ -134,11 +157,16 @@ if "${DC[@]}" run --rm --entrypoint certbot certbot \
     || echo "::warning:: nginx would not reload; it will pick the new certificate up on its own within 6h."
   echo "Done.${staging_arg:+ STAGING certificate — re-run with LETSENCRYPT_STAGING=0 once you are happy.}"
 else
-  echo "::warning:: Certificate issuance failed."
-  echo "  A DNS-01 failure is almost always the ${DNS_PROVIDER} credentials or zone in .env"
-  echo "  (the zone is the REGISTERED domain, not a subdomain). After changing .env,"
-  echo "  re-run ./render.sh, and \`docker compose up -d certbot\` so renewals see it too."
-  echo "  The certbot log above names the call that failed."
+  # A dummy is reseeded so nginx still answers something, but this script
+  # itself must fail: a gateway serving no valid certificate is the
+  # half-configured state worse than one that refused to come up at all
+  # (TOON_Network#163), so it is not this script's place to call that "done".
   seed_dummy
   "${DC[@]}" exec nginx nginx -s reload 2>/dev/null || true
+  echo "::error:: Certificate issuance failed." >&2
+  echo "  A DNS-01 failure is almost always the ${DNS_PROVIDER} credentials or zone in .env" >&2
+  echo "  (the zone is the REGISTERED domain, not a subdomain). The certbot log above names" >&2
+  echo "  the API call that failed. After fixing .env, re-run ./render.sh, then" >&2
+  echo "  \`docker compose up -d certbot\` so renewals see it too, then ./init-letsencrypt.sh." >&2
+  exit 1
 fi
