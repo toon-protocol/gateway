@@ -13,12 +13,9 @@
 // What it holds still, and why:
 //   * the one terminated route, its handler and its price — the handler path
 //     is where a handover lands, and nothing else decides it;
-//   * the devnet preset's settlement deployment in .env.example, because a
-//     node that settles against the wrong token cannot be paid and says so
-//     only at boot;
+//   * the settlement deployment, because a node that settles against the
+//     wrong token cannot be paid and says so only at boot;
 //   * `[node]`, because a node that cannot say where it is cannot be reached;
-//   * that every deployment-specific value is a variable, so an operator never
-//     edits a committed file (render.test.mjs renders them);
 //   * the connector pin, in exactly one place, because two copies drift;
 //   * the exposure invariants: the door is never published, the connector's
 //     edge is loopback-only, and only the TLS front faces the internet;
