@@ -24,8 +24,8 @@ set -a; . ./.env; set +a
 
 : "${GATEWAY_DOMAIN:?set GATEWAY_DOMAIN in .env}"
 : "${EDGE_HOST:?set EDGE_HOST in .env (the hostname of the ILP edge this gateway is paid at)}"
-: "${OPERATOR_BEARER_TOKEN:?set OPERATOR_BEARER_TOKEN in .env (openssl rand -hex 32)}"
-: "${OPERATOR_WRITE_KEY:?set OPERATOR_WRITE_KEY in .env (the key allowed to sign operator writes)}"
+: "${OPERATOR_BEARER_TOKEN:?set OPERATOR_BEARER_TOKEN in .env (./keys.sh init generates it)}"
+: "${OPERATOR_WRITE_KEY:?set OPERATOR_WRITE_KEY in .env (the key allowed to sign operator writes; ./keys.sh init generates a pair)}"
 # Settlement is required, with no default: which chain and token this node is
 # paid in is a fact about the network it joins, and a silent default would be
 # the devnet's mock USDC. .env.example carries the devnet's as a preset.
