@@ -53,16 +53,18 @@ for the connector's Solana settlement key.
    `cd /root/gateway/deploy` and `cp .env.example .env`. In `.env` set an
    `ILP_ADDRESS` of your own such as `g.<your-name>.workload-gateway`, then
    `GATEWAY_DOMAIN`, `EDGE_HOST`, `LETSENCRYPT_EMAIL`, `DNS_PROVIDER` and
-   that provider's lines, and `OPERATOR_BEARER_TOKEN` and
-   `OPERATOR_WRITE_KEY` as the file describes. Leave the relay and settlement
-   block as the devnet preset.
-2. Generate the keys: `openssl rand -hex 32 > <file>` for `signer.key`,
-   `settlement.key` and `settlement-solana.key`, then `chmod 600 *.key`. Keep
-   a copy of `signer.key` off the box. Tenants seal to it, so it *is* your
-   gateway.
-3. [Fund the Solana settlement key](deploy/README.md#funding) with devnet SOL
-   from <https://faucet.solana.com>. The connector will not start without it.
-   The EVM key needs nothing to boot.
+   that provider's lines. Leave the relay and settlement block as the devnet
+   preset.
+2. Run `./keys.sh init`. It generates the three key files and the two
+   operator credentials in `.env`, and never replaces one that exists. It
+   prints the operator write key's private half once: save it on the machine
+   you administer from. Keep a copy of `signer.key` off the box. Tenants seal
+   to it, so it *is* your gateway.
+3. Fund what `./keys.sh addresses` prints: the connector's Solana settlement
+   address, in base58, with devnet SOL from <https://faucet.solana.com>. The
+   connector will not start without it, and `bootstrap.sh` checks the balance
+   first and stops if it is short. The EVM address it also prints needs
+   nothing to boot ([why](deploy/README.md#funding)).
 4. Run `./bootstrap.sh`. It installs Docker, writes the internal
    certificate, renders the config, pulls and starts the four services,
    requests a Let's Encrypt *staging* certificate over DNS-01, and installs

@@ -4,16 +4,17 @@
 #
 #   ./bootstrap.sh
 #
-# Expects .env and the three key files to already be in this directory; see
-# README.md § "Standing one up". Everything it installs is listed here, and it
+# Expects .env and the three key files to already be in this directory
+# (./keys.sh init makes them), and the Solana settlement key ./keys.sh
+# addresses lists to be funded; see README.md § "Standing one up". Everything it installs is listed here, and it
 # makes no changes outside this directory, ufw, docker, journald and the two
 # systemd units it owns.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-[ -f .env ] || { echo "Missing .env — copy .env.example and fill it in." >&2; exit 1; }
+[ -f .env ] || { echo "Missing .env — run ./keys.sh init, then fill in the rest of it." >&2; exit 1; }
 for f in signer.key settlement.key settlement-solana.key; do
-  [ -f "$f" ] || { echo "Missing $f — see README.md § Standing one up." >&2; exit 1; }
+  [ -f "$f" ] || { echo "Missing $f — run ./keys.sh init (README.md § Standing one up)." >&2; exit 1; }
 done
 
 set -a; . ./.env; set +a
@@ -21,6 +22,26 @@ set -a; . ./.env; set +a
 : "${EDGE_HOST:?set EDGE_HOST in .env}"
 # render.sh checks the rest of .env, and says which line is wrong; these two are
 # needed before it runs, for the internal certificate.
+
+echo "==> Keys and funding"
+# Before anything is installed or started: an unfunded Solana settlement key
+# is a connector that restart-loops, with the reason buried in its log.
+# keys.sh asks the Solana RPC for its balance (a free read) and, when it is
+# short, refuses here with every address to fund and what to fund it with --
+# the list ./keys.sh addresses prints.
+#
+# On a box that is already up (its connector running, or an apply recorded in
+# .applied) a shortfall is a warning, not a refusal: a re-run reconciles a
+# working box. An RPC that does not answer is a warning either way.
+command -v python3 >/dev/null 2>&1 || { apt-get update -y && apt-get install -y python3-minimal; }
+funded=0
+if [ -f .applied ] || { command -v docker >/dev/null 2>&1 &&
+     docker compose ps --status running --services 2>/dev/null | grep -qx connector; }; then
+  ./keys.sh check-funded --warn-only || funded=$?
+else
+  ./keys.sh check-funded || funded=$?
+fi
+if [ "$funded" = 1 ]; then exit 1; fi
 
 echo "==> [1/8] Firewall"
 # Only SSH, HTTP (redirect, and an ACME fallback) and HTTPS. This box publishes

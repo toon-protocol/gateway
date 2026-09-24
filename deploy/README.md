@@ -26,12 +26,13 @@ One host, four containers, one wildcard certificate.
 | `nginx/node.conf.template` | The two server blocks. Rendered. |
 | `certbot/<provider>.py` | The DNS-01 auth and cleanup hooks, one file per DNS provider: `porkbun.py`, `cloudflare.py`. No plugin, no image of our own. |
 | `render.sh` | Renders the above from `.env`, and refuses a `.env` that would render something wrong. Idempotent. |
+| `keys.sh` + `keys.py` | Generates every missing key and prints every address to fund, before anything boots. Needs only `python3`. |
 | `bootstrap.sh` | Fresh host → running box. Idempotent. |
 | `pull-images.sh` | Gets the pinned images onto the box: pulls them, or builds the gateway from the checkout while its pin is still the `sha-0000000` placeholder. |
 | `init-letsencrypt.sh` | Issues or reuses the certificate. Idempotent. |
 | `auto-apply.sh` + the two units | The box half of GitOps: follow the branch, apply what merged. |
 | `.env.example` | Every variable, with what it is and how to generate it. |
-| `bundle.test.mjs`, `render.test.mjs`, `dns01.test.mjs`, `pull-images.test.mjs` | The guard: the real files above, `render.sh` run for real, the DNS hooks against a stub API, and `pull-images.sh` against a stub `docker`. `npm run test:deploy`. |
+| `bundle.test.mjs`, `render.test.mjs`, `dns01.test.mjs`, `pull-images.test.mjs`, `keys.test.mjs` | The guard: the real files above, `render.sh` run for real, the DNS hooks against a stub API, `pull-images.sh` against a stub `docker`, and `keys.sh`'s addresses against the connector's own derivation. `npm run test:deploy`. |
 | `testdata/` | What the devnet box rendered before its values moved to `.env`; `render.test.mjs` holds the devnet preset to it byte for byte. |
 
 `.env`, the rendered `connector.toml`, `operator-bearer.token`,
@@ -149,8 +150,9 @@ expiring it would be a scheduled outage bought for nothing.
 ## Standing one up
 
 **Before you start** you need a host, the three DNS A-records above, API
-credentials for the DNS provider that holds your zone (§ "DNS-01"), and three
-key files.
+credentials for the DNS provider that holds your zone (§ "DNS-01"), and 1–2
+devnet SOL for the connector's Solana settlement address, which `keys.sh`
+prints in step 3.
 
 **1. Clone and configure.** Clone `main` and leave the checkout exactly as it
 is: `auto-apply.sh` keeps the box up to date by fast-forwarding it, and stops
@@ -165,21 +167,32 @@ $EDITOR .env          # every variable is documented in the file
 ```
 
 Fill in `ILP_ADDRESS`, `GATEWAY_DOMAIN`, `EDGE_HOST`, `DNS_PROVIDER` and that
-provider's lines, and the two operator credentials. The relay and settlement
-block is the **devnet preset**: leave it to front workloads on the TOON
-devnet, which settles in mock USDC. See § "Make it yours" for what each value
-decides.
+provider's lines; `keys.sh` fills in the two operator credentials in step 2.
+The relay and settlement block is the **devnet preset**: leave it to front
+workloads on the TOON devnet, which settles in mock USDC. See § "Make it
+yours" for what each value decides.
 
-**2. Generate the key material.** Three files, all `0600`, none of them ever
-committed. Each is 32 bytes as 64 hex characters — the only format the
-connector reads.
+**2. Generate the key material.** One command, on the box, before anything
+else runs on it. It needs only `python3`, which every Ubuntu release ships:
 
 ```bash
-openssl rand -hex 32 > signer.key             # THIS GATEWAY'S IDENTITY
-openssl rand -hex 32 > settlement.key         # the EVM settlement key
-openssl rand -hex 32 > settlement-solana.key  # the Solana settlement key
-chmod 600 *.key
+./keys.sh init
 ```
+
+It writes whatever is missing and never replaces what exists, so it is safe to
+re-run and safe to run over keys you brought yourself. Put your own in place
+first if you have them.
+
+| What | Where | What it is |
+|---|---|---|
+| `signer.key` | file | **This gateway's identity**: the key a tenant seals its handover to. |
+| `settlement.key` | file | The connector's EVM settlement key. |
+| `settlement-solana.key` | file | The connector's Solana settlement key. |
+| `OPERATOR_BEARER_TOKEN` | `.env` | Gates the connector's `/metrics` and redeem endpoints. |
+| `OPERATOR_WRITE_KEY` | `.env` | The **public** half of a fresh ed25519 key for signing operator writes. |
+
+The three files are `0600`, and each is 32 bytes as 64 hex characters, the
+only format the connector reads.
 
 `signer.key` is the key a tenant **seals its handover to**. The gateway process
 itself holds no key at all — nothing is signed and nothing is published on
@@ -187,11 +200,27 @@ either side (spec §12.1, ADR 0016) — so as far as a tenant is concerned this
 connector's signing key *is* the gateway. Replacing it makes this a different
 gateway, and every grant already handed over stops being addressable.
 
-Record how each key was derived, somewhere off this box. A lost `signer.key`
-is a lost gateway.
+The operator write key's **private** half is printed once and stored nowhere
+on the box. Save it as a file on the machine you administer from: it is what
+`connector send --operator-key <file>` signs with. To use a key you already
+hold instead, set `OPERATOR_WRITE_KEY` to what `connector send --operator-key
+<file> --print-keyid` prints for it before you run `init`.
 
-**3. Fund the two settlement identities.** See § "Funding", below. Do this
-**before** the first `up -d`: an unfunded Solana key is a refuse-to-start.
+Back the three key files up somewhere off this box, as `init` reminds you. A
+lost `signer.key` is a lost gateway.
+
+**3. Fund what `./keys.sh addresses` prints.**
+
+```bash
+./keys.sh addresses
+```
+
+It prints the connector's Solana settlement address in base58 with its faucet
+command, and its EVM address, which needs nothing to boot (§ "Funding" says
+why). Fund the Solana one **before** the first `up -d`: an unfunded Solana key
+is a refuse-to-start. `bootstrap.sh` checks its balance with a free
+`getBalance` before it touches the host, and stops with the same list if it
+is short, rather than letting the connector restart-loop.
 
 **4. Bring it up.**
 
@@ -234,21 +263,18 @@ later, never at load time.
 Neither key needs the settlement token. Money flows *to* a gateway's connector only if someone
 prices its route, and nobody does.
 
-Print the two addresses from the key files:
+`./keys.sh addresses` prints both addresses from the key files, before
+anything has booted. Each is derived the way the connector derives it, and
+`keys.test.mjs` holds each derivation to the connector's own on fixed keys:
 
-```bash
-# EVM
-cast wallet address --private-key "0x$(cat settlement.key)"
+- the Solana address is the ed25519 public key of `settlement-solana.key`, in
+  base58: the same bytes `connector send --operator-key settlement-solana.key
+  --print-keyid` prints in hex;
+- the EVM address comes from `settlement.key`, printed with EIP-55 casing.
+  `GET /ilp` prints the same address in lowercase.
 
-# Solana: --print-keyid gives the raw ed25519 public key in hex; Solana spells
-# the same bytes in base58.
-docker run --rm -v "$PWD:/d:ro" ghcr.io/toon-protocol/connector:rust-2026.09.11.1 \
-  send --operator-key /d/settlement-solana.key --print-keyid
-```
-
-Both are also served, already derived, by `GET /ilp` once the node is up —
-which is the copy to trust, because the connector proved each of them against a
-live chain when it booted.
+Once the node is up, `GET /ilp` serves both as well, after the connector has
+proved each of them against a live chain.
 
 ## Checking it works
 
