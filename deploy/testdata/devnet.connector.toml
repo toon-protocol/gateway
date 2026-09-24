@@ -1,14 +1,6 @@
 # =============================================================================
 # Connector config for the TOON Workload Gateway box — rendered by ./render.sh
 # =============================================================================
-#: Lines that start `#:` are notes on the TEMPLATE, and render.sh drops them.
-#: Every deployment-specific value below is a ${VARIABLE} from .env, so an
-#: operator never edits this file: a box runs from an unmodified checkout, and
-#: auto-apply.sh stops on a dirty one. Everything else, comments included,
-#: renders unchanged, which is what keeps the devnet preset's rendering
-#: byte-for-byte what the devnet box already runs (bundle.test.mjs checks it
-#: against deploy/testdata/): a changed byte there would bounce its connector
-#: on the next auto-apply for nothing.
 # ADR 0013 puts a Workload Gateway behind its own connector like any other TOON
 # app, and this is that connector. It terminates ONE route: the sealed Gateway
 # Handover — and the Gateway Withdrawal, which rides the same route (spec
@@ -82,11 +74,8 @@ key_file = "/app/data/signer.key"
 # service name. That listener is published on no host port, deliberately: a
 # handover that did not come through this connector is not a message this
 # gateway should ever see.
-#: The route hangs off ILP_ADDRESS, so it is always this node's own address
-#: plus `.handover` — the one a tenant is told to seal to — and never a
-#: second, separately-typed copy of it that could disagree with [node].
 [[routes]]
-prefix      = "${ILP_ADDRESS}.handover"
+prefix      = "g.toon.workload-gateway.handover"
 handler_url = "http://gateway:8081/handover"
 price       = 0
 
@@ -104,25 +93,20 @@ price       = 0
 # values are the ones the devnet's other connectors answer with; read them back
 # from any of their `GET /ilp` rather than trusting a second copy of them.
 
-#: Every value in the two sections below comes from the SETTLEMENT_* lines of
-#: .env; .env.example ships the TOON devnet's as a labelled preset. The
-#: trailing labels and the paragraph above were written for that preset and
-#: are kept word for word so its rendering does not change; on any other
-#: chain, what your .env says is what the connector checks at boot.
 [settlement.evm]
-rpc_url          = "${SETTLEMENT_EVM_RPC_URL}"
-contract_address = "${SETTLEMENT_EVM_REGISTRY}"  # TokenNetworkRegistry
-token_address    = "${SETTLEMENT_EVM_TOKEN}"  # mock USDC (6dp)
-decimals         = ${SETTLEMENT_EVM_DECIMALS}
+rpc_url          = "https://base-sepolia-rpc.publicnode.com"
+contract_address = "0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5"  # TokenNetworkRegistry
+token_address    = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"  # mock USDC (6dp)
+decimals         = 6
 
 [settlement.evm.key]
 key_file = "/app/data/settlement.key"
 
 [settlement.solana]
-rpc_url       = "${SETTLEMENT_SOLANA_RPC_URL}"
-program_id    = "${SETTLEMENT_SOLANA_PROGRAM_ID}"
-token_address = "${SETTLEMENT_SOLANA_TOKEN}"   # mock USDC (6dp)
-decimals      = ${SETTLEMENT_SOLANA_DECIMALS}
+rpc_url       = "https://api.devnet.solana.com"
+program_id    = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip"
+token_address = "34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU"   # mock USDC (6dp)
+decimals      = 6
 
 [settlement.solana.key]
 key_file = "/app/data/settlement-solana.key"
@@ -150,13 +134,10 @@ write_keys_file   = "/app/data/operator-write.keys"
 # follows is specific to this box's place in the TOON devnet.
 #
 # The ILP edge deliberately does NOT live under the gateway's own domain. The
-# gateway serves every single label under `${GATEWAY_DOMAIN}` as a workload
+# gateway serves every single label under `gw.devnet.toonprotocol.dev` as a workload
 # hostname, so a name taken there is a name a tenant cannot have; this node's
 # edge sits beside it instead.
-#: ILP_ADDRESS is required and has no default. render.sh refuses one under
-#: `g.toon.` — the TOON fleet's own namespace — unless .env sets
-#: TOON_DEVNET_BOX=1, which only the fleet's own boxes do.
 [node]
-addresses     = ["${ILP_ADDRESS}"]
-http_endpoint = "https://${EDGE_HOST}/ilp"
-btp_endpoint  = "wss://${EDGE_HOST}/ilp/btp"
+addresses     = ["g.toon.workload-gateway"]
+http_endpoint = "https://proxy.gateway.devnet.toonprotocol.dev/ilp"
+btp_endpoint  = "wss://proxy.gateway.devnet.toonprotocol.dev/ilp/btp"

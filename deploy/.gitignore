@@ -5,6 +5,7 @@
 connector.toml
 operator-bearer.token
 operator-write.keys
+dns-01.env
 nginx/conf.d/
 tls/
 *.key

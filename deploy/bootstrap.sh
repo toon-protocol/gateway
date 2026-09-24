@@ -19,6 +19,8 @@ done
 set -a; . ./.env; set +a
 : "${GATEWAY_DOMAIN:?set GATEWAY_DOMAIN in .env}"
 : "${EDGE_HOST:?set EDGE_HOST in .env}"
+# render.sh checks the rest of .env, and says which line is wrong; these two are
+# needed before it runs, for the internal certificate.
 
 echo "==> [1/8] Firewall"
 # Only SSH, HTTP (redirect, and an ACME fallback) and HTTPS. This box publishes
@@ -70,9 +72,11 @@ chmod 644 tls/internal.crt
 echo "==> [5/8] Render config"
 ./render.sh
 
-echo "==> [6/8] Build and start"
-docker compose pull --ignore-buildable --ignore-pull-failures
-docker compose build
+echo "==> [6/8] Pull and start"
+# Every image is a pin. pull-images.sh pulls them all, and fails on a pin that
+# will not pull, except the sha-0000000 placeholder, which it builds from this
+# checkout instead (README § "How updates arrive").
+./pull-images.sh
 docker compose up -d
 
 echo "==> [7/8] TLS"
@@ -93,6 +97,7 @@ echo "Workload Gateway box up."
 echo "  workloads      : https://<label>.${GATEWAY_DOMAIN}/"
 echo "  ILP edge       : https://${EDGE_HOST}/ilp"
 echo "  sealing key    : https://${EDGE_HOST}/ilp/identity   (what a tenant seals a handover to)"
+echo "  handover route : ${ILP_ADDRESS}.handover"
 echo
 echo "A hostname this gateway holds no grant for answers 503 with"
 echo "  toon-gateway-reason: no_grant — that is the healthy, empty state."

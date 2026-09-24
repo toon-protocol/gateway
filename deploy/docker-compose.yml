@@ -186,16 +186,19 @@ services:
   # ── The certificate ────────────────────────────────────────────────────────
   # DNS-01, not HTTP-01, and this is the first bundle in the fleet that needs
   # it: the certificate covers `*.${GATEWAY_DOMAIN}`, and Let's Encrypt issues
-  # a wildcard over DNS-01 only. The hooks under ./certbot write and delete
-  # the `_acme-challenge` TXT record through the Porkbun API with the two
-  # credentials below; they are plain python3, which the certbot image already
+  # a wildcard over DNS-01 only. The hook under ./certbot that DNS_PROVIDER
+  # names writes and deletes the `_acme-challenge` TXT record through that DNS
+  # provider's API; hooks are plain python3, which the certbot image already
   # has, so this stays the stock image with no plugin baked in.
+  #
+  # Its credentials arrive through dns-01.env, which render.sh writes from
+  # .env: DNS_PROVIDER and that provider's own <PROVIDER>_* lines, and nothing
+  # else. Not `env_file: .env` — that would hand this container the operator
+  # bearer token too — and not a list here, which would make every new DNS
+  # provider an edit to this file.
   certbot:
     image: certbot/certbot
-    environment:
-      PORKBUN_API_KEY: ${PORKBUN_API_KEY:?set PORKBUN_API_KEY in .env}
-      PORKBUN_SECRET_KEY: ${PORKBUN_SECRET_KEY:?set PORKBUN_SECRET_KEY in .env}
-      PORKBUN_ZONE: ${PORKBUN_ZONE:?set PORKBUN_ZONE in .env}
+    env_file: dns-01.env
     volumes:
       - certbot_conf:/etc/letsencrypt
       - certbot_www:/var/www/certbot

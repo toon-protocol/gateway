@@ -41,8 +41,11 @@ const gitignore = read('.gitignore');
 const renderSh = read('render.sh');
 
 // ── The literals this bundle is ───────────────────────────────────────────
-const ILP_ADDRESS = 'g.toon.workload-gateway';
-const HANDOVER_ROUTE = 'g.toon.workload-gateway.handover';
+// The route and the address are templated off ILP_ADDRESS, so what is held
+// still here is the template's spelling of them; render.test.mjs renders the
+// devnet preset and holds the result to what the devnet box ran before.
+const ILP_ADDRESS = '${ILP_ADDRESS}';
+const HANDOVER_ROUTE = '${ILP_ADDRESS}.handover';
 const HANDOVER_PORT = '8081';
 const HANDOVER_HANDLER = 'http://gateway:8081/handover';
 const CONNECTOR_PIN = 'ghcr.io/toon-protocol/connector:rust-2026.09.11.1';
@@ -81,7 +84,7 @@ const rx = (literal) => literal.replace(/[.*+?^${}()|[\]\\/-]/g, '\\$&');
 
 describe('the terminated route', () => {
   it('is the one sealed handover route, free, at the door the gateway serves', () => {
-    assert.match(connectorToml, new RegExp(`prefix\\s*=\\s*"${HANDOVER_ROUTE}"`));
+    assert.match(connectorToml, new RegExp(`prefix\\s*=\\s*"${rx(HANDOVER_ROUTE)}"`));
     assert.match(connectorToml, new RegExp(`handler_url\\s*=\\s*"${rx(HANDOVER_HANDLER)}"`));
     // `price = 0` is WRITTEN, never omitted: a terminated route is never
     // silently free, and the parser requires a price either way.
@@ -100,7 +103,7 @@ describe('the terminated route', () => {
 
 describe('[node] — what this box says it is', () => {
   it('claims exactly its own address', () => {
-    assert.match(connectorToml, new RegExp(`addresses\\s*=\\s*\\["${ILP_ADDRESS}"\\]`));
+    assert.match(connectorToml, new RegExp(`addresses\\s*=\\s*\\["${rx(ILP_ADDRESS)}"\\]`));
   });
 
   it('advertises public, TLS endpoints, rendered from one variable', () => {
@@ -110,18 +113,46 @@ describe('[node] — what this box says it is', () => {
 });
 
 describe('settlement', () => {
-  it('settles on Base Sepolia through the registry, against the 6dp mock USDC', () => {
-    assert.match(connectorToml, /contract_address\s*=\s*"0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5"/);
-    assert.match(connectorToml, /token_address\s*=\s*"0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"/);
+  it('takes every chain, contract, token and RPC from .env', () => {
+    for (const [key, name] of [
+      ['rpc_url', 'SETTLEMENT_EVM_RPC_URL'],
+      ['contract_address', 'SETTLEMENT_EVM_REGISTRY'],
+      ['token_address', 'SETTLEMENT_EVM_TOKEN'],
+      ['rpc_url', 'SETTLEMENT_SOLANA_RPC_URL'],
+      ['program_id', 'SETTLEMENT_SOLANA_PROGRAM_ID'],
+      ['token_address', 'SETTLEMENT_SOLANA_TOKEN'],
+    ]) {
+      assert.match(connectorToml, new RegExp(`^${key}\\s*=\\s*"\\$\\{${name}\\}"`, 'm'));
+    }
+    assert.match(connectorToml, /^decimals\s*=\s*\$\{SETTLEMENT_EVM_DECIMALS\}$/m);
+    assert.match(connectorToml, /^decimals\s*=\s*\$\{SETTLEMENT_SOLANA_DECIMALS\}$/m);
+    // No literal chain value is left behind in the template to disagree with .env.
+    assert.doesNotMatch(connectorToml.replace(/^#.*$/gm, ''), /0x[0-9a-fA-F]{40}|devnet|sepolia/i);
   });
 
-  it('settles on Solana devnet against the deployed payment-channel program', () => {
-    assert.match(connectorToml, /program_id\s*=\s*"2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip"/);
-    assert.match(connectorToml, /token_address\s*=\s*"34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU"/);
+  it('presets Base Sepolia through the registry, against the 6dp mock USDC', () => {
+    assert.match(envExample, /^SETTLEMENT_EVM_RPC_URL=https:\/\/base-sepolia-rpc\.publicnode\.com$/m);
+    assert.match(envExample, /^SETTLEMENT_EVM_REGISTRY=0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5$/m);
+    assert.match(envExample, /^SETTLEMENT_EVM_TOKEN=0x49beE1Bca5d15Fb0963117923403F9498119a9Ce$/m);
   });
 
-  it('states 6 decimals on both legs, which the connector checks against the chain', () => {
-    assert.equal([...connectorToml.matchAll(/^\s*decimals\s*=\s*6\s*$/gm)].length, 2);
+  it('presets Solana devnet against the deployed payment-channel program', () => {
+    assert.match(envExample, /^SETTLEMENT_SOLANA_RPC_URL=https:\/\/api\.devnet\.solana\.com$/m);
+    assert.match(envExample, /^SETTLEMENT_SOLANA_PROGRAM_ID=2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip$/m);
+    assert.match(envExample, /^SETTLEMENT_SOLANA_TOKEN=34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU$/m);
+  });
+
+  it('presets 6 decimals on both legs, which the connector checks against the chain', () => {
+    assert.match(envExample, /^SETTLEMENT_EVM_DECIMALS=6$/m);
+    assert.match(envExample, /^SETTLEMENT_SOLANA_DECIMALS=6$/m);
+  });
+
+  it('labels the devnet values as a preset, and keeps them inside it', () => {
+    const start = envExample.indexOf('THE TOON DEVNET PRESET');
+    const end = envExample.indexOf('End of the devnet preset.');
+    assert.ok(start > 0 && end > start, '.env.example has no labelled devnet preset');
+    const outside = (envExample.slice(0, start) + envExample.slice(end)).replace(/^#.*$/gm, '');
+    assert.doesNotMatch(outside, /devnet|sepolia/i, 'a devnet value sits outside the preset');
   });
 
   it('names key FILES, never key values', () => {
@@ -179,7 +210,7 @@ describe('the connector pin', () => {
   });
 
   it('is written in docker-compose.yml and nowhere else in the bundle', () => {
-    const elsewhere = ['connector.toml.template', 'nginx/node.conf.template', 'auto-apply.sh', 'render.sh', 'bootstrap.sh'];
+    const elsewhere = ['connector.toml.template', 'nginx/node.conf.template', 'auto-apply.sh', 'render.sh', 'bootstrap.sh', 'pull-images.sh'];
     for (const name of elsewhere) {
       assert.doesNotMatch(read(name), /rust-sha-|rust-main|rust-release|rust-\d{4}\.\d{2}\.\d{2}\.\d+/, `${name} names a connector build`);
     }
@@ -223,7 +254,7 @@ describe('the gateway pin', () => {
     const pins = [...compose.matchAll(/^\s*image:\s*ghcr\.io\/toon-protocol\/gateway:\S+\s*$/gm)];
     assert.equal(pins.length, 1, `expected exactly one gateway image: line, found ${pins.length}`);
 
-    const elsewhere = ['connector.toml.template', 'nginx/node.conf.template', 'auto-apply.sh', 'render.sh', 'bootstrap.sh'];
+    const elsewhere = ['connector.toml.template', 'nginx/node.conf.template', 'auto-apply.sh', 'render.sh', 'bootstrap.sh', 'pull-images.sh'];
     for (const name of elsewhere) {
       assert.doesNotMatch(
         read(name),
@@ -320,7 +351,7 @@ describe('render.sh', () => {
   });
 
   it('renders every file the bundle needs and nothing the bundle commits', () => {
-    for (const output of ['connector.toml', 'operator-bearer.token', 'operator-write.keys', 'nginx/conf.d/node.conf']) {
+    for (const output of ['connector.toml', 'operator-bearer.token', 'operator-write.keys', 'nginx/conf.d/node.conf', 'dns-01.env']) {
       assert.ok(renderSh.includes(output), `render.sh does not write ${output}`);
     }
   });
@@ -328,7 +359,7 @@ describe('render.sh', () => {
 
 describe('nothing secret is committable', () => {
   it('gitignores every rendered output and every key', () => {
-    for (const line of ['.env', 'connector.toml', 'operator-bearer.token', 'operator-write.keys', 'nginx/conf.d/', 'tls/', '*.key']) {
+    for (const line of ['.env', 'connector.toml', 'operator-bearer.token', 'operator-write.keys', 'dns-01.env', 'nginx/conf.d/', 'tls/', '*.key']) {
       assert.ok(
         gitignore.split('\n').some((row) => row.trim() === line),
         `.gitignore does not carry ${line}`,
@@ -338,8 +369,16 @@ describe('nothing secret is committable', () => {
   });
 
   it('ships an .env.example with every required variable empty', () => {
-    for (const name of ['PORKBUN_API_KEY', 'PORKBUN_SECRET_KEY', 'OPERATOR_BEARER_TOKEN', 'OPERATOR_WRITE_KEY']) {
+    // Who this gateway is and how it proves its zone are the operator's to
+    // say; a devnet default for any of them would be a copy of our box.
+    for (const name of ['ILP_ADDRESS', 'GATEWAY_DOMAIN', 'EDGE_HOST', 'DNS_PROVIDER', 'OPERATOR_BEARER_TOKEN', 'OPERATOR_WRITE_KEY']) {
       assert.match(envExample, new RegExp(`^${name}=$`, 'm'), `${name} is not present-and-empty in .env.example`);
     }
+  });
+
+  it('hands certbot the DNS hook\'s own variables, never the whole .env', () => {
+    const certbotBlock = compose.slice(compose.indexOf('  certbot:'), compose.indexOf('\nvolumes:'));
+    assert.match(certbotBlock, /^\s+env_file: dns-01\.env$/m);
+    assert.doesNotMatch(certbotBlock, /env_file:\s*\.\/?\.env\b|PORKBUN|CLOUDFLARE/);
   });
 });
