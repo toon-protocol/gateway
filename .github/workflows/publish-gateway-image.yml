@@ -1,0 +1,148 @@
+name: Publish gateway image
+
+# Publishes the image `deploy/docker-compose.yml`'s `gateway` service pins by
+# immutable tag (TOON_Network#155):
+#
+#   ghcr.io/toon-protocol/gateway   this repository's Dockerfile, built at the
+#                                   repo root (`docker build .`)
+#
+# `sha-<short-sha>` on every push to `main` — immutable, tagged by content,
+# same scheme as the provider's own `sha-<short>` (TOON_Network#151) — plus a
+# bare `<version>` alias (the git tag with its leading `v` stripped) when the
+# push is a version tag. No floating alias like the connector's `rust-main`:
+# nothing in this repository follows one automatically (`auto-apply.sh` pulls
+# whatever `docker-compose.yml` pins, and that pin only ever moves by a
+# reviewed commit — see deploy/README.md, "Bumping the gateway pin"), so a
+# moving tag here would have nothing to be pulled by except a human, who may
+# as well pull the sha.
+#
+# Modelled on toon-protocol/connector's own
+# .github/workflows/publish-connector-rust-image.yml and the provider's
+# .github/workflows/publish-provider-image.yml (TOON_Network#151), so the
+# fleet has one pattern for this. See the connector workflow's header for the
+# fuller history: content-addressed tags, and GHCR defaulting a brand-new
+# package to PRIVATE.
+#
+# `linux/amd64` only: nothing in the fleet pulls arm64 today (every devnet box
+# is x86_64), and this is a `node:22-slim` build rather than a Rust compile, so
+# the emulated-arm64-is-much-slower argument that keeps the connector and the
+# provider amd64-only does not even need to be invoked here — it is simply
+# what #155 asked for ("build linux/amd64 at least").
+#
+# CI's own `docker-build` job (.github/workflows/ci.yml) already proves the
+# Dockerfile builds on every PR, with `push: false`. This workflow does the
+# pushing half, on `main` and on a release tag only.
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+    paths:
+      - 'src/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'Dockerfile'
+      - '.github/workflows/publish-gateway-image.yml'
+  workflow_dispatch: {}
+
+concurrency:
+  # A push to `main`: only the newest build is ever wanted, and it's tagged by
+  # content, so cancelling a superseded run costs nothing (rebuild it by
+  # `workflow_dispatch` on that commit if it's ever needed again). A tag push
+  # or a manual dispatch gets a group of its own, so a release build can
+  # neither cancel nor be cancelled by an unrelated push to `main`.
+  group: publish-gateway-image-${{ (github.ref_type == 'branch' && github.event_name == 'push') && 'auto' || github.run_id }}
+  cancel-in-progress: ${{ github.ref_type == 'branch' && github.event_name == 'push' }}
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/gateway
+
+jobs:
+  build-and-push:
+    name: Build and push gateway image
+    runs-on: ubuntu-latest
+    outputs:
+      short_sha: ${{ steps.tags.outputs.short }}
+      tags: ${{ steps.tags.outputs.tags }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Compute tags
+        id: tags
+        run: |
+          short=$(echo "${{ github.sha }}" | cut -c1-7)
+          tags="${IMAGE}:sha-${short}"
+          # A version tag (`v1.2.3`) additionally gets the bare version as an
+          # alias onto the exact same manifest the sha tag names — never a
+          # separate build, so the two can never disagree about which image
+          # they mean.
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+            tags="$(printf '%s\n%s' "$tags" "${IMAGE}:${version}")"
+          fi
+          {
+            echo "short=$short"
+            echo "tags<<TAGS_EOF"
+            echo "$tags"
+            echo "TAGS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the gateway image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # amd64 only — see the header above.
+          platforms: linux/amd64
+
+      # Make the package public so `docker pull` works with no authentication
+      # (#155's acceptance criterion) — GHCR defaults a new container package
+      # to PRIVATE regardless of the linked repo's visibility. Idempotent once
+      # public. continue-on-error because the very first run creates the
+      # package, and a repo-scoped GITHUB_TOKEN cannot always flip visibility
+      # on a package in the same run it was created in — see the PR's "For a
+      # human" if this warns.
+      - name: Set container package visibility to public
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api --method PATCH \
+            "/orgs/${{ github.repository_owner }}/packages/container/gateway" \
+            -f visibility=public \
+            && echo "✓ gateway visibility set to public" \
+            || echo "::warning::could not set gateway visibility — may need manual fix in the GHCR UI"
+
+      - name: Publish summary
+        run: |
+          {
+            echo "## gateway image published"
+            echo ""
+            echo "**Image:** \`${IMAGE}\`"
+            echo '```'
+            echo "${{ steps.tags.outputs.tags }}"
+            echo '```'
+            echo "digest: \`${{ steps.build.outputs.digest }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
