@@ -64,12 +64,13 @@ for the connector's Solana settlement key.
    from <https://faucet.solana.com>. The connector will not start without it.
    The EVM key needs nothing to boot.
 4. Run `./bootstrap.sh`. It installs Docker, writes the internal
-   certificate, renders the config, pulls and starts the four services,
-   requests a Let's Encrypt *staging* certificate over DNS-01, and installs
-   the timer that keeps the box on `main`.
-5. If step 4 printed `Done. STAGING certificate` rather than
-   `Certificate issuance failed`, set `LETSENCRYPT_STAGING=0` in `.env` and
-   run `./init-letsencrypt.sh` for the real certificate.
+   certificate, renders the config, pulls and starts the four services, and
+   requests a Let's Encrypt *staging* certificate over DNS-01 — warning first
+   if the wildcard or `EDGE_HOST` do not resolve here yet, and stopping with
+   the cause and the command to re-run if issuance fails — then installs the
+   timer that keeps the box on `main`.
+5. Once step 4 succeeds, set `LETSENCRYPT_STAGING=0` in `.env` and run
+   `./init-letsencrypt.sh` for the real certificate.
 
 Then [check it works](deploy/README.md#checking-it-works):
 

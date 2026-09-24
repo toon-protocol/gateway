@@ -80,7 +80,12 @@ echo "==> [6/8] Pull and start"
 docker compose up -d
 
 echo "==> [7/8] TLS"
-./init-letsencrypt.sh
+if ! ./init-letsencrypt.sh; then
+  echo "FAILED: certificate issuance did not succeed (its message is above, naming the" >&2
+  echo "likely cause). Everything up to here already applied. Fix it, then re-run:" >&2
+  echo "  cd $(pwd) && ./init-letsencrypt.sh" >&2
+  exit 1
+fi
 
 echo "==> [8/8] The auto-apply timer"
 # The box follows the tracked branch from here on: every five minutes it

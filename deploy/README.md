@@ -205,10 +205,20 @@ the wrong shape), pulls and starts the four containers, requests a
 certificate, and enables the auto-apply timer. It is idempotent — re-run it to
 reconcile a box.
 
+`init-letsencrypt.sh` warns first if `anything.${GATEWAY_DOMAIN}` (the
+wildcard) or `${EDGE_HOST}` do not yet resolve to this box — DNS-01 does not
+need that to issue, but nothing will reach the gateway through them until they
+do. If issuance itself fails, it exits non-zero naming the likely cause (almost
+always `DNS_PROVIDER`'s credentials or zone in `.env`), and `bootstrap.sh`
+stops there with that message and the command to re-run, rather than reporting
+the box up on no valid certificate. A certificate that is still valid and
+outside its renewal window — the case on every idempotent re-run — is reused
+without going near any of this.
+
 **5. Go to production TLS.** `bootstrap.sh` starts on Let's Encrypt *staging*
-so a mistake does not burn the real rate limit for a wildcard. Once a staging
-certificate has issued cleanly, set `LETSENCRYPT_STAGING=0` in `.env` and
-re-run `./init-letsencrypt.sh`.
+so a mistake does not burn the real rate limit for a wildcard. Once step 4
+succeeds, set `LETSENCRYPT_STAGING=0` in `.env` and re-run
+`./init-letsencrypt.sh`.
 
 ## Funding
 
