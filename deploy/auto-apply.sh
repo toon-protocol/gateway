@@ -235,7 +235,16 @@ wait_healthy connector || exit 1
 # address list: an unreachable /ilp must be reported as unreachable, not as a
 # config mismatch. The curl retries first so one connection blip does not leave
 # the box unverified until the next merge.
-ILP_PORT=$({ sed -n "s/.*'127\.0\.0\.1:\([0-9]*\):[0-9]*'.*/\1/p" docker-compose.yml | head -n 1; } || true)
+# The port is asked of compose first: `docker compose port connector 4000`
+# resolves the connector's published loopback port across every file
+# COMPOSE_FILE names, so a box-local overlay that remaps it is honoured. On the
+# shared devnet host (infra#24) this node's connector happens to keep 4000,
+# while the store's is remapped to 4003 -- and the store's copy of this line,
+# reading docker-compose.yml alone, asked this node's connector and restarted
+# its own on every timer run (connector#1337). Only when compose gives no answer
+# does the committed file decide.
+ILP_PORT=$({ docker compose "${COMPOSE[@]}" port connector 4000 2>/dev/null | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' | head -n 1; } || true)
+[ -n "$ILP_PORT" ] || ILP_PORT=$({ sed -n "s/.*'127\.0\.0\.1:\([0-9]*\):[0-9]*'.*/\1/p" docker-compose.yml | head -n 1; } || true)
 ILP_PORT=${ILP_PORT:-4000}
 served_ilp_addresses() {
   local body

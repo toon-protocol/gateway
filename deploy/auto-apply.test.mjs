@@ -154,6 +154,7 @@ if [ "\${1:-}" = compose ]; then
     "ps -q "*) svc=\${rest#ps -q }; echo "cid-$svc"; exit 0 ;;
     "restart "*) exit "\${STUB_RESTART_EXIT:-0}" ;;
     "logs --tail 40 "*) exit 0 ;;
+    "port connector 4000") echo "\${STUB_PORT:-}"; exit 0 ;;
     "exec -T nginx nginx -s reload") exit "\${STUB_NGINX_RELOAD_EXIT:-0}" ;;
   esac
   echo "stub docker: unexpected compose call: $rest" >&2
@@ -167,6 +168,7 @@ exit 97
 
 const CURL_STUB = `#!/usr/bin/env bash
 url="\${@: -1}"
+echo "curl $url" >> "$STUB_LOG"
 case "$url" in
   http://127.0.0.1:*/ilp)
     addr=$(sed -n '/^\\[node\\]/,/^\\[/s/^[[:space:]]*addresses[[:space:]]*=[[:space:]]*\\[\\(.*\\)\\].*/\\1/p' connector.toml | head -n1)
@@ -188,7 +190,7 @@ before(() => {
 });
 
 let runs = 0;
-function autoApply(boxDir) {
+function autoApply(boxDir, extraEnv = {}) {
   const log = join(boxDir, `stub-log-${runs++}`);
   writeFileSync(log, '');
   const env = {
@@ -201,6 +203,7 @@ function autoApply(boxDir) {
     // Never the real, root-owned /var/lock/toon-auto-apply-gateway.lock --
     // this is the one knob auto-apply.sh exposes purely for tests.
     TOON_AUTOAPPLY_LOCK: join(boxDir, '.autoapply.lock'),
+    ...extraEnv,
   };
   const r = spawnSync('bash', [join(boxDir, 'deploy', 'auto-apply.sh')], { env, encoding: 'utf8' });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr, calls: readFileSync(log, 'utf8') };
@@ -287,6 +290,31 @@ describe('a box with no deploy/.applied at all', () => {
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     assert.equal(applied(box), origin.sha, 'the first run writes .applied once the apply is verified healthy');
     assert.match(result.calls, /ps -q gateway/, 'it actually ran the apply, not a silent no-op');
+  });
+});
+
+// ── The connector port a box-local overlay remaps (connector#1337) ─────────
+describe('the connector port a box-local overlay remaps (connector#1337)', () => {
+  it('asks compose for the published port, so it reads THIS connector and not a neighbour on the committed port', () => {
+    const origin = freshOrigin();
+    const box = cloneBox(origin.dir);
+    writeEnv(box, ENV);
+
+    const result = autoApply(box, { STUB_PORT: '127.0.0.1:4005' });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.calls, /port connector 4000/);
+    assert.match(result.calls, /curl http:\/\/127\.0\.0\.1:4005\/ilp/, 'GET /ilp goes to the port compose reported');
+    assert.doesNotMatch(result.calls, /curl http:\/\/127\.0\.0\.1:4000\/ilp/);
+  });
+
+  it('falls back to the committed file when compose has no answer', () => {
+    const origin = freshOrigin();
+    const box = cloneBox(origin.dir);
+    writeEnv(box, ENV);
+
+    const result = autoApply(box);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.calls, /curl http:\/\/127\.0\.0\.1:\d+\/ilp/);
   });
 });
 
