@@ -36,11 +36,15 @@
 #                    upstream today. Its existing loopback publish
 #                    (127.0.0.1:4000) is untouched: bootstrap.sh and
 #                    auto-apply.sh still read it locally.
-#   mem_limit        added to every service, PROVISIONAL: nobody has measured
-#                    the live box yet (toon-protocol/infra#25 step 2). Sized
-#                    conservatively for a 2 GB host shared by five nodes —
-#                    replace with real `docker stats` numbers once the box is
-#                    up and update this comment when you do.
+#   mem_limit        added to every service. The devnet host turned out to be
+#                    a 1 GB Linode nanode (961 MB total, ~350 MB used by
+#                    OS/Docker before any node starts), not the 2 GB host
+#                    first assumed. `gateway` and `connector` are now sized
+#                    from real `docker stats` measurements taken 2026-09-25
+#                    (toon-protocol/infra#25 step 2) — see each service's own
+#                    comment below. `nginx` and `certbot` stay disabled and
+#                    keep their original small limits unmeasured: nobody has
+#                    re-measured a proxy that never runs under this overlay.
 #
 # ── One network per node, not one flat network (shared contract v2) ─────────
 # `edge-gateway` is THIS NODE'S OWN network, joined by nothing else: the edge
@@ -81,16 +85,16 @@ services:
       default: {}
       edge-gateway:
         aliases: [gateway-gw]
-    # provisional — replace with docker stats measurements (toon-protocol/infra#25 step 2)
-    mem_limit: 256m
+    # measured idle 43 MB on 2026-09-25 (toon-protocol/infra#25 step 2); limit ≈4× idle
+    mem_limit: 192m
 
   connector:
     networks:
       default: {}
       edge-gateway:
         aliases: [gateway-proxy]
-    # provisional — replace with docker stats measurements (toon-protocol/infra#25 step 2)
-    mem_limit: 128m
+    # measured idle 7 MB on 2026-09-25 (toon-protocol/infra#25 step 2); limit ≈4× idle
+    mem_limit: 64m
 
   nginx:
     profiles: [disabled]

@@ -436,7 +436,7 @@ describe('the shared-edge overlay', () => {
     assert.doesNotMatch(sharedEdge, /^\s+edge:\s*$/m);
   });
 
-  it('gives every service a mem_limit, each marked provisional', () => {
+  it('gives every service a mem_limit', () => {
     // Split the file into blocks at each line indented by EXACTLY two spaces
     // (`  name:`) — a line indented further is that service's own content, so
     // this cuts the file into one chunk per top-level key (`networks:`,
@@ -446,7 +446,32 @@ describe('the shared-edge overlay', () => {
       const block = blocks.find((b) => b.startsWith(`  ${name}:`));
       assert.ok(block, `no ${name}: service in the overlay`);
       assert.match(block, /mem_limit:\s*\d+[mg]/i, `${name} has no mem_limit`);
-      assert.match(block, /provisional — replace with docker stats measurements \(toon-protocol\/infra#25 step 2\)/, `${name}'s mem_limit is not marked provisional`);
+    }
+  });
+
+  it('gateway and connector carry a measured mem_limit comment, not the old provisional one', () => {
+    // These two are the only services this overlay actually runs, so they're
+    // the only ones anyone has measured `docker stats` against — the
+    // comment should say so and point back at the issue, without this test
+    // hardcoding the exact MB figures (those belong to the file, not to a
+    // second copy here that would drift from it).
+    const blocks = sharedEdge.split(/\n(?=  \S)/);
+    for (const name of ['gateway', 'connector']) {
+      const block = blocks.find((b) => b.startsWith(`  ${name}:`));
+      assert.ok(block, `no ${name}: service in the overlay`);
+      assert.match(block, /#.*measured idle \d+ ?MB on 2026-09-25.*toon-protocol\/infra#25 step 2/, `${name}'s mem_limit comment doesn't cite a measurement and infra#25`);
+      assert.doesNotMatch(block, /provisional/i, `${name}'s mem_limit comment still says provisional`);
+    }
+  });
+
+  it('nginx and certbot keep their old provisional mem_limit comment — disabled, never measured', () => {
+    // Nobody re-measures a proxy that never runs under this overlay; their
+    // small limits are just carried over from before.
+    const blocks = sharedEdge.split(/\n(?=  \S)/);
+    for (const name of ['nginx', 'certbot']) {
+      const block = blocks.find((b) => b.startsWith(`  ${name}:`));
+      assert.ok(block, `no ${name}: service in the overlay`);
+      assert.match(block, /provisional — replace with docker stats measurements \(toon-protocol\/infra#25 step 2\)/, `${name}'s mem_limit is no longer marked provisional`);
     }
   });
 

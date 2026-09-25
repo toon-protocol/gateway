@@ -249,9 +249,14 @@ pin is the `sha-0000000` placeholder (`pull-images.sh`, from `../Dockerfile`,
 build context `..`) — the overlay does not touch that; it only adds network
 membership and a memory limit to the same service.
 
-`mem_limit`s in the overlay are **provisional**: nobody has measured the live
-box yet (toon-protocol/infra#25 step 2). Replace them with real `docker stats`
-numbers once the box is up, and update the overlay's comments when you do.
+The devnet host turned out to be a 1 GB Linode nanode (961 MB total, ~350 MB
+used by OS/Docker before any node starts), not the 2 GB host first assumed
+when the overlay's `mem_limit`s were provisional. `gateway`'s and
+`connector`'s limits are now sized from real `docker stats` measurements
+taken 2026-09-25 (toon-protocol/infra#25 step 2): the gateway app idled at
+43 MB (limit 192m, ≈4× idle) and the connector idled at 7 MB (limit 64m,
+≈4× idle). `nginx` and `certbot` keep their original 32m limits unmeasured —
+both stay disabled under this overlay, so nobody has measured them running.
 
 `bootstrap.sh` refuses, before `docker compose up -d`, if `SHARED_EDGE=1` and
 the external `edge-gateway` network does not exist yet — it is created by the

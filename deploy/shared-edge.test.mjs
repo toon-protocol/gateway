@@ -89,7 +89,8 @@ describe('the shared-edge overlay, merged by docker compose itself', { skip }, (
     // Shared contract v2: this node's own network, never the old flat `edge`.
     assert.doesNotMatch(full.stdout, /\bedge:\s*\n\s*name: edge\s*\n/, 'the merge still names the old flat `edge` network');
     // mem_limit survives the merge as a number of bytes; a per-service
-    // presence check, not a value (README documents the values are provisional).
+    // presence check, not a value — bundle.test.mjs is where the actual
+    // numbers and comments are pinned, against the overlay source itself.
     // Split at each line indented by EXACTLY two spaces (a top-level key) so
     // a service's own deeper-indented content doesn't cut the block short.
     const blocks = full.stdout.split(/\n(?=  \S)/);
