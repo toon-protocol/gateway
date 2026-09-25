@@ -215,6 +215,18 @@ describe('init-letsencrypt.sh', () => {
     assert.ok(certonly, 'expected a certonly call');
     assert.doesNotMatch(certonly, /--staging/);
   });
+
+  it('SHARED_EDGE=1: issues nothing and never touches docker at all (toon-protocol/gateway#18)', () => {
+    // The devnet host's shared edge terminates TLS; this box has no nginx or
+    // certbot to seed, reload or issue into, so the real assertion is that
+    // this script never calls docker at all -- not merely that it declines
+    // to request a certificate.
+    const r = initLetsencrypt({ env: { SHARED_EDGE: '1' } });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /SHARED_EDGE=1/);
+    assert.match(r.stdout, /toon-protocol\/infra#24/);
+    assert.deepEqual(r.calls, [], 'init-letsencrypt.sh called docker under SHARED_EDGE=1');
+  });
 });
 
 describe('bootstrap.sh stops on a failed certificate', () => {

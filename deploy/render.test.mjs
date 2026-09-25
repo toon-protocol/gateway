@@ -18,7 +18,7 @@
 //     their box.
 //
 // It needs bash and envsubst (gettext-base), as render.sh itself does.
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -207,5 +207,61 @@ describe('what render.sh refuses', () => {
 
   it('a DNS provider whose credentials are not in .env', () => {
     refused({ DNS_PROVIDER: 'porkbun' }, /sets no PORKBUN_\* variable/);
+  });
+});
+
+// ── SHARED_EDGE (toon-protocol/gateway#18, infra#24) ────────────────────────
+// This box's own nginx and certbot step aside for the devnet host's shared
+// edge; render.sh must neither require a DNS provider nor write the two files
+// that only ever mattered to this box's own certificate.
+const SHARED_EDGE_OPERATOR = {
+  ILP_ADDRESS: 'g.acme.workload-gateway',
+  GATEWAY_DOMAIN: 'gw.acme.example',
+  EDGE_HOST: 'proxy.gateway.acme.example',
+  OPERATOR_BEARER_TOKEN: 'placeholder-bearer',
+  OPERATOR_WRITE_KEY: 'placeholder-write-key',
+  SHARED_EDGE: '1',
+  COMPOSE_FILE: 'docker-compose.yml:docker-compose.shared-edge.yml',
+};
+
+describe('SHARED_EDGE (toon-protocol/gateway#18)', () => {
+  it('renders with no DNS_PROVIDER at all, and writes neither dns-01.env nor nginx/conf.d/node.conf', () => {
+    // .env.example ships DNS_PROVIDER empty; SHARED_EDGE_OPERATOR never sets
+    // it, so a render that still required it would fail here.
+    const box = render(SHARED_EDGE_OPERATOR);
+    assert.equal(box.status, 0, box.stderr);
+    assert.doesNotMatch(box.stdout, /DNS-01 hook/);
+    assert.ok(!existsSync(join(box.dir, 'dns-01.env')), 'dns-01.env was rendered under SHARED_EDGE=1');
+    assert.ok(!existsSync(join(box.dir, 'nginx/conf.d/node.conf')), 'nginx/conf.d/node.conf was rendered under SHARED_EDGE=1');
+    assert.match(box.file('connector.toml'), /^addresses\s*=\s*\["g\.acme\.workload-gateway"\]$/m);
+  });
+
+  it('removes a stale dns-01.env and nginx conf left over from before the switch was flipped', () => {
+    const dir = freshCheckout();
+    // First, a plain render — this box's own edge, DNS-01 configured.
+    writeEnv(dir, OUTSIDE_OPERATOR);
+    let result = run('bash', ['render.sh'], dir);
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(existsSync(join(dir, 'dns-01.env')));
+    assert.ok(existsSync(join(dir, 'nginx/conf.d/node.conf')));
+
+    // Now the operator flips the switch and re-renders in place.
+    writeEnv(dir, { ...OUTSIDE_OPERATOR, DNS_PROVIDER: '', SHARED_EDGE: '1', COMPOSE_FILE: 'docker-compose.yml:docker-compose.shared-edge.yml' });
+    result = run('bash', ['render.sh'], dir);
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(!existsSync(join(dir, 'dns-01.env')), 'a stale dns-01.env survived the switch to SHARED_EDGE=1');
+    assert.ok(!existsSync(join(dir, 'nginx/conf.d/node.conf')), 'a stale nginx conf survived the switch to SHARED_EDGE=1');
+  });
+
+  it('refuses SHARED_EDGE=1 without the overlay named in COMPOSE_FILE', () => {
+    const result = render({ ...SHARED_EDGE_OPERATOR, COMPOSE_FILE: '' });
+    assert.notEqual(result.status, 0, 'render.sh accepted SHARED_EDGE=1 with no matching COMPOSE_FILE');
+    assert.match(result.stderr, /COMPOSE_FILE in \.env does not name docker-compose\.shared-edge\.yml/);
+  });
+
+  it('refuses the overlay named in COMPOSE_FILE without SHARED_EDGE=1', () => {
+    const result = render({ ...SHARED_EDGE_OPERATOR, SHARED_EDGE: '0' });
+    assert.notEqual(result.status, 0, 'render.sh accepted the overlay in COMPOSE_FILE with SHARED_EDGE not 1');
+    assert.match(result.stderr, /COMPOSE_FILE in \.env names docker-compose\.shared-edge\.yml, but SHARED_EDGE is not 1/);
   });
 });

@@ -1,0 +1,103 @@
+# =============================================================================
+# The shared-edge overlay — this box behind the devnet host's one edge
+# (toon-protocol/gateway#18, toon-protocol/infra#24, infra ADR 0001)
+# =============================================================================
+# The devnet is moving onto one Linode: the relay, store, gas station,
+# workload gateway and faucet all share it behind one Caddy that owns 80 and
+# 443. Every node keeps its own connector, keys and hostnames — only its own
+# TLS front goes away. This file is what that costs this bundle:
+#
+#   nginx, certbot   DISABLED (`profiles: [disabled]` — nothing here ever sets
+#                    COMPOSE_PROFILES=disabled, so `docker compose up -d`
+#                    never starts them and binds no host port 80 or 443).
+#                    render.sh, bootstrap.sh and init-letsencrypt.sh skip the
+#                    cert work that would otherwise go with them when
+#                    SHARED_EDGE=1 is set beside this overlay (see .env.example
+#                    § "RUNNING BEHIND THE SHARED EDGE").
+#   gateway          joins the external `edge-gateway` network under the alias
+#                    `gateway-gw`, so the host's Caddy reaches it directly at
+#                    `gateway-gw:8443` — still the self-signed INTERNAL
+#                    certificate bootstrap.sh writes, not a public one. That
+#                    hop stays TLS on purpose: the gateway decides the
+#                    `X-Forwarded-Proto` it hands a workload from WHICH OF ITS
+#                    OWN LISTENERS the connection arrived on, not from a
+#                    header (docker-compose.yml's own comment on
+#                    GATEWAY_HTTPS_PORT), so a plain-HTTP hop here would tell
+#                    every workload `http` while the visitor was on `https`.
+#                    The edge must dial it the same way nginx does:
+#                    `https://`, with certificate verification off (the peer
+#                    is a container on a private network, reached by name,
+#                    with nothing to verify it against) and SNI set to the
+#                    upstream name. deploy/README.md § "Running behind the
+#                    shared edge" has the exact nginx behaviour to replicate.
+#   connector        joins `edge-gateway` under the alias `gateway-proxy`, so
+#                    the edge reaches the sealed ILP door at
+#                    `gateway-proxy:4000` — plain HTTP, same as nginx's own
+#                    upstream today. Its existing loopback publish
+#                    (127.0.0.1:4000) is untouched: bootstrap.sh and
+#                    auto-apply.sh still read it locally.
+#   mem_limit        added to every service, PROVISIONAL: nobody has measured
+#                    the live box yet (toon-protocol/infra#25 step 2). Sized
+#                    conservatively for a 2 GB host shared by five nodes —
+#                    replace with real `docker stats` numbers once the box is
+#                    up and update this comment when you do.
+#
+# ── One network per node, not one flat network (shared contract v2) ─────────
+# `edge-gateway` is THIS NODE'S OWN network, joined by nothing else: the edge
+# project creates five fixed-name networks, one per node (`edge-relay`,
+# `edge-store`, `edge-gas`, `edge-gateway`, `edge-faucet`), and Caddy alone
+# joins all five. A single flat `edge` network shared by every node's
+# containers gave any of them a path to any other's connector `/admin` route
+# and to this gateway's own handover door (8081) — Docker has no per-port ACL
+# between containers on the same bridge network, so "not published" was never
+# enough once the network was shared. Per-node networks mean only the edge
+# reaches a node; nothing here needs to trust its neighbours.
+#
+# Turned on in .env, two lines together (render.sh refuses one without the
+# other, the same check the provider bundle's HIDDEN switch uses):
+#
+#   SHARED_EDGE=1
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.shared-edge.yml
+#
+# docker compose reads COMPOSE_FILE out of .env for every command run in this
+# directory, so bootstrap.sh, pull-images.sh, auto-apply.sh and an operator's
+# own `docker compose ps` all see the same stack. None of them ever names THIS
+# file with a `-f` of its own — auto-apply.sh names only its own fallback,
+# `-f docker-compose.yml`, and only once it has confirmed .env sets no
+# COMPOSE_FILE at all, never by guessing at what COMPOSE_FILE contains.
+#
+# THE DEFAULT MUST NOT CHANGE. A `.env` with no COMPOSE_FILE line — everything
+# this bundle ships today — runs docker-compose.yml alone, exactly as before:
+# this file is inert until named.
+# =============================================================================
+
+networks:
+  edge-gateway:
+    external: true
+
+services:
+  gateway:
+    networks:
+      default: {}
+      edge-gateway:
+        aliases: [gateway-gw]
+    # provisional — replace with docker stats measurements (toon-protocol/infra#25 step 2)
+    mem_limit: 256m
+
+  connector:
+    networks:
+      default: {}
+      edge-gateway:
+        aliases: [gateway-proxy]
+    # provisional — replace with docker stats measurements (toon-protocol/infra#25 step 2)
+    mem_limit: 128m
+
+  nginx:
+    profiles: [disabled]
+    # provisional — replace with docker stats measurements (toon-protocol/infra#25 step 2)
+    mem_limit: 32m
+
+  certbot:
+    profiles: [disabled]
+    # provisional — replace with docker stats measurements (toon-protocol/infra#25 step 2)
+    mem_limit: 32m

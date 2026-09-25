@@ -5,7 +5,7 @@ Description=Check every 5 minutes for a merged TOON Workload Gateway bundle chan
 OnBootSec=2min
 OnUnitActiveSec=5min
 AccuracySec=30s
-Unit=toon-auto-apply.service
+Unit=toon-auto-apply-gateway.service
 
 [Install]
 WantedBy=timers.target

@@ -43,12 +43,14 @@ DEPLOY_DIR="$REPO_DIR/deploy"
 cd "$REPO_DIR"
 
 TRACK_BRANCH=main
+COMPOSE_FILE=
 if [ -f "$DEPLOY_DIR/.env" ]; then
-  # Only this one variable, and only from a well-formed line: sourcing .env
+  # Only these two variables, and only from a well-formed line: sourcing .env
   # here would pull the Porkbun credentials and the operator token into this
   # script's environment for no reason.
   value=$(sed -n 's/^[[:space:]]*TRACK_BRANCH[[:space:]]*=[[:space:]]*//p' "$DEPLOY_DIR/.env" | tail -n 1 | tr -d '"'"'"' \t\r')
   [ -n "$value" ] && TRACK_BRANCH=$value
+  COMPOSE_FILE=$(sed -n 's/^[[:space:]]*COMPOSE_FILE[[:space:]]*=[[:space:]]*//p' "$DEPLOY_DIR/.env" | tail -n 1 | tr -d '"'"'"' \t\r')
 fi
 
 # The [node] addresses a connector.toml advertises, one per line, sorted.
@@ -80,9 +82,12 @@ fingerprint_connector_inputs() {
       2>/dev/null || true; } | sha256sum | awk '{print $1}'
 }
 
-# One apply at a time, and never one racing a human. The path is overridable
-# only for tests (TOON_AUTOAPPLY_LOCK) -- a box always takes the real one.
-LOCK_FILE=${TOON_AUTOAPPLY_LOCK:-/var/lock/toon-auto-apply.lock}
+# One apply at a time, and never one racing a human. Named per node
+# (`-gateway`), matching toon-auto-apply-gateway.{service,timer}, so several
+# nodes on one host each take their own lock rather than one another's
+# (toon-protocol/infra#25). The path is overridable only for tests
+# (TOON_AUTOAPPLY_LOCK) -- a box always takes the real one.
+LOCK_FILE=${TOON_AUTOAPPLY_LOCK:-/var/lock/toon-auto-apply-gateway.lock}
 exec 9>"$LOCK_FILE"
 flock -n 9 || { echo "another apply is already running; leaving it alone"; exit 0; }
 
@@ -161,7 +166,20 @@ if ! ./render.sh; then
 fi
 SUM_AFTER=$(fingerprint_connector_inputs)
 
-COMPOSE=(-f docker-compose.yml)
+# This script never re-parses COMPOSE_FILE's own value -- what it read above
+# is only a yes/no on whether .env sets it at all. When it does (the
+# shared-edge overlay, docker-compose.shared-edge.yml, toon-protocol/gateway#18,
+# turned on by COMPOSE_FILE=docker-compose.yml:docker-compose.shared-edge.yml),
+# this passes NO `-f` flags at all: `docker compose` flags outrank an
+# environment variable, so a hardcoded `-f docker-compose.yml` here would
+# silently override .env's COMPOSE_FILE and run the plain stack regardless of
+# what the box was told to run. Only a `.env` with no COMPOSE_FILE line falls
+# back to this script's own default, which is the base file alone.
+if [ -n "$COMPOSE_FILE" ]; then
+  COMPOSE=()
+else
+  COMPOSE=(-f docker-compose.yml)
+fi
 
 # Captured before `up -d` so a recreation is distinguishable: a recreated
 # connector already booted on the just-rendered files and must not be bounced a
@@ -288,7 +306,15 @@ fi
 # change either. It is never restarted -- restarting the TLS front is what the
 # other bundles go out of their way to avoid -- so tell it to reload instead,
 # which re-reads conf.d and the certificate without dropping a connection.
-if [ "$SUM_AFTER" != "$SUM_BEFORE" ] || ! cmp -s nginx/conf.d/node.conf nginx/conf.d/.node.conf.applied 2>/dev/null; then
+#
+# `-f nginx/conf.d/node.conf` first: under SHARED_EDGE=1, render.sh removes
+# that file and docker-compose.shared-edge.yml disables nginx entirely (the
+# devnet host's shared edge fronts this box instead), so there is nothing to
+# reload -- without this guard, `!cmp` reads two missing files as "differ"
+# on every single run and this would try to reload a container that was never
+# started, five minutes apart, forever.
+if [ -f nginx/conf.d/node.conf ] \
+  && { [ "$SUM_AFTER" != "$SUM_BEFORE" ] || ! cmp -s nginx/conf.d/node.conf nginx/conf.d/.node.conf.applied 2>/dev/null; }; then
   docker compose "${COMPOSE[@]}" exec -T nginx nginx -s reload \
     && cp nginx/conf.d/node.conf nginx/conf.d/.node.conf.applied \
     || echo "::warning:: nginx would not reload; check its logs."

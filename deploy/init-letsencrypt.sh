@@ -20,6 +20,18 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 set -a; . ./.env; set +a
+
+# SHARED_EDGE=1 (toon-protocol/gateway#18, infra#24): nginx and certbot are
+# disabled by docker-compose.shared-edge.yml and the devnet host's own Caddy
+# terminates TLS instead, so this box issues no certificate of its own — there
+# is no nginx to seed a dummy into, no dns-01.env (render.sh does not render
+# it under the overlay) and no rate-limit slot worth spending.
+if [ "${SHARED_EDGE:-0}" = 1 ]; then
+  echo "SHARED_EDGE=1 — the devnet host's shared edge terminates TLS (toon-protocol/infra#24);" \
+       "this box issues no certificate of its own."
+  exit 0
+fi
+
 : "${GATEWAY_DOMAIN:?set GATEWAY_DOMAIN in .env}"
 : "${EDGE_HOST:?set EDGE_HOST in .env}"
 : "${LETSENCRYPT_EMAIL:?set LETSENCRYPT_EMAIL in .env}"
