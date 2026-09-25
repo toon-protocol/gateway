@@ -99,8 +99,22 @@ describe('the shared-edge overlay, merged by docker compose itself', { skip }, (
       assert.ok(block, `no ${service}: block in the merged config`);
       assert.match(block, /mem_limit: "\d+"/, `${service} has no mem_limit once merged`);
     }
-    // The connector's own loopback publish survives the overlay untouched.
-    assert.match(full.stdout, /host_ip: 127\.0\.0\.1\s*\n\s*target: 4000/);
+    // The connector moves off the shared 4000 to its own loopback port under
+    // the overlay (toon-protocol/infra#25 — every node bundle otherwise
+    // publishes 127.0.0.1:4000, which collides once several share a host).
+    // The container side stays 4000; only the published host port changes,
+    // and `!override` must leave this the ONLY port entry for the connector.
+    const connectorBlock = blocks.find((b) => b.startsWith('  connector:'));
+    const ports = [
+      ...connectorBlock.matchAll(
+        /- mode: ingress\s*\n\s*host_ip: ([^\n]+)\s*\n\s*target: (\d+)\s*\n\s*published: "(\d+)"/g,
+      ),
+    ];
+    assert.deepEqual(
+      ports.map((m) => [m[1], m[2], m[3]]),
+      [['127.0.0.1', '4000', '4001']],
+      'the connector must publish exactly 127.0.0.1:4001:4000, and nothing else, under the overlay',
+    );
   });
 
   it('with no COMPOSE_FILE line: the default is exactly what it always was — nginx and certbot run, 80 and 443 are bound', () => {
@@ -115,5 +129,18 @@ describe('the shared-edge overlay, merged by docker compose itself', { skip }, (
     assert.match(full.stdout, /published: "443"/);
     assert.doesNotMatch(full.stdout, /mem_limit/, 'the default must carry no mem_limit — the overlay was not named');
     assert.doesNotMatch(full.stdout, /edge-gateway/, 'the default must not reference `edge-gateway` — the overlay was not named');
+    // Without the overlay, the connector's loopback publish is unchanged.
+    const blocks = full.stdout.split(/\n(?=  \S)/);
+    const connectorBlock = blocks.find((b) => b.startsWith('  connector:'));
+    const ports = [
+      ...connectorBlock.matchAll(
+        /- mode: ingress\s*\n\s*host_ip: ([^\n]+)\s*\n\s*target: (\d+)\s*\n\s*published: "(\d+)"/g,
+      ),
+    ];
+    assert.deepEqual(
+      ports.map((m) => [m[1], m[2], m[3]]),
+      [['127.0.0.1', '4000', '4000']],
+      'without the overlay the connector must still publish exactly 127.0.0.1:4000:4000',
+    );
   });
 });
