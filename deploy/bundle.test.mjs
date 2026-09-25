@@ -25,11 +25,14 @@
 //   * healthchecks dialling 127.0.0.1, because "localhost" in a container can
 //     resolve to ::1, where an IPv4-bound listener never answers;
 //   * the shared-edge overlay (toon-protocol/gateway#18): nginx and certbot
-//     disabled, `gateway`/`connector` joined to the external `edge` network
-//     under their stable aliases, a mem_limit on every service, and the
-//     default (no overlay named) left byte-for-byte unchanged;
-//   * every script naming `-f docker-compose.yml` nowhere, so `COMPOSE_FILE`
-//     in `.env` — not a script flag — is what picks the overlay;
+//     disabled, `gateway`/`connector` joined to this node's own external
+//     `edge-gateway` network — never the old flat `edge` shared contract v2
+//     retired — under their stable aliases, a mem_limit on every service, and
+//     the default (no overlay named) left byte-for-byte unchanged;
+//   * auto-apply.sh never re-parsing COMPOSE_FILE's own value, only whether
+//     `.env` sets it at all — set, no `-f` of its own; unset, its own
+//     `-f docker-compose.yml` fallback — so `COMPOSE_FILE` in `.env`, not a
+//     guess, picks the overlay;
 //   * SHARED_EDGE named everywhere cert work has to stop for it (render.sh,
 //     bootstrap.sh, auto-apply.sh's nginx reload) — shape-checked here, run
 //     for real in render.test.mjs and init-letsencrypt.test.mjs.
@@ -52,6 +55,7 @@ const sharedEdge = read('docker-compose.shared-edge.yml');
 const autoApplySh = read('auto-apply.sh');
 const bootstrapSh = read('bootstrap.sh');
 const initLetsencryptSh = read('init-letsencrypt.sh');
+const readme = read('README.md');
 
 // ── The literals this bundle is ───────────────────────────────────────────
 // The route and the address are templated off ILP_ADDRESS, so what is held
@@ -414,18 +418,22 @@ describe('the shared-edge overlay', () => {
     }
   });
 
-  it('joins the gateway to `edge` under gateway-gw, the alias the shared edge dials for gw.devnet and *.gw.devnet', () => {
+  it('joins the gateway to `edge-gateway` under gateway-gw, the alias the shared edge dials for gw.devnet and *.gw.devnet', () => {
     const gatewayBlock = sharedEdge.slice(sharedEdge.indexOf('\n  gateway:'), sharedEdge.indexOf('\n  connector:'));
-    assert.match(gatewayBlock, /networks:\s*\n\s+default:\s*\{\}\s*\n\s+edge:\s*\n\s+aliases:\s*\[gateway-gw\]/);
+    assert.match(gatewayBlock, /networks:\s*\n\s+default:\s*\{\}\s*\n\s+edge-gateway:\s*\n\s+aliases:\s*\[gateway-gw\]/);
   });
 
-  it('joins the connector to `edge` under gateway-proxy, the alias the shared edge dials for proxy.gateway.devnet', () => {
+  it('joins the connector to `edge-gateway` under gateway-proxy, the alias the shared edge dials for proxy.gateway.devnet', () => {
     const connectorBlock = sharedEdge.slice(sharedEdge.indexOf('\n  connector:'), sharedEdge.indexOf('\n  nginx:'));
-    assert.match(connectorBlock, /networks:\s*\n\s+default:\s*\{\}\s*\n\s+edge:\s*\n\s+aliases:\s*\[gateway-proxy\]/);
+    assert.match(connectorBlock, /networks:\s*\n\s+default:\s*\{\}\s*\n\s+edge-gateway:\s*\n\s+aliases:\s*\[gateway-proxy\]/);
   });
 
-  it('declares `edge` as the external network the host edge owns, not one this bundle creates', () => {
-    assert.match(sharedEdge, /^networks:\n\s+edge:\n\s+external:\s*true\s*$/m);
+  it('declares `edge-gateway` as the external network the host edge owns, not one this bundle creates, and never joins the old flat `edge`', () => {
+    assert.match(sharedEdge, /^networks:\n\s+edge-gateway:\n\s+external:\s*true\s*$/m);
+    // Shared contract v2: no node's containers sit on a network another
+    // node's containers are also on. A stray literal `edge:` (rather than
+    // `edge-gateway:`) network key would be exactly that regression.
+    assert.doesNotMatch(sharedEdge, /^\s+edge:\s*$/m);
   });
 
   it('gives every service a mem_limit, each marked provisional', () => {
@@ -454,20 +462,27 @@ describe('the shared-edge overlay', () => {
   });
 });
 
-describe('scripts respect COMPOSE_FILE (the shared-edge overlay is a .env line, not a script flag)', () => {
-  it('auto-apply.sh names no docker-compose.yml of its own, so COMPOSE_FILE in .env picks the stack', () => {
-    // The bug this guards: an explicit `-f docker-compose.yml` on every
-    // `docker compose` call would outrank COMPOSE_FILE from .env (compose
-    // flags win over the environment), so a box with the overlay named in
-    // .env would still only ever run the plain stack. No `-f` anywhere in
-    // this script is what lets bootstrap.sh, pull-images.sh, an operator's own
-    // `docker compose ps` and this script all agree on what is running.
-    assert.doesNotMatch(autoApplySh, /^COMPOSE=\(-f\s+docker-compose\.yml\)/m);
-    assert.match(autoApplySh, /^COMPOSE=\(\)$/m);
+describe('scripts respect COMPOSE_FILE (the shared-edge overlay is a .env line, not a script flag, shared contract v2 point 3)', () => {
+  it('auto-apply.sh never re-parses COMPOSE_FILE\'s own value, only whether .env sets it', () => {
+    // The bug this guards: an unconditional, hardcoded `-f docker-compose.yml`
+    // on every `docker compose` call would outrank COMPOSE_FILE from .env
+    // (compose flags win over the environment), so a box with the overlay
+    // named in .env would still only ever run the plain stack. auto-apply.sh
+    // is the one script in this bundle allowed a `-f` of its own at all, and
+    // only as its OWN fallback for when .env sets no COMPOSE_FILE — never by
+    // reading COMPOSE_FILE's content and rebuilding a file list from it.
+    assert.match(autoApplySh, /if\s*\[\s*-n\s*"\$COMPOSE_FILE"\s*\]\s*;\s*then/);
+    assert.match(autoApplySh, /COMPOSE=\(\)/, 'no -f when .env sets COMPOSE_FILE');
+    assert.match(autoApplySh, /COMPOSE=\(-f docker-compose\.yml\)/, 'its own -f docker-compose.yml fallback when .env sets none');
+    // It reads COMPOSE_FILE's presence the same careful way it already reads
+    // TRACK_BRANCH -- a single well-formed line, never the whole .env (which
+    // would pull the Porkbun credentials and the operator token into this
+    // script's environment for no reason).
+    assert.match(autoApplySh, /COMPOSE_FILE=\$\(sed -n 's\/\^\[\[:space:\]\]\*COMPOSE_FILE/);
   });
 
   for (const name of ['bootstrap.sh', 'pull-images.sh', 'init-letsencrypt.sh']) {
-    it(`${name} names no docker-compose.yml of its own either`, () => {
+    it(`${name} names no docker-compose.yml of its own`, () => {
       assert.doesNotMatch(read(name), /-f\s+docker-compose\.yml/);
     });
   }
@@ -502,9 +517,9 @@ describe('cert work is skipped under the shared edge (SHARED_EDGE=1)', () => {
     assert.match(tlsStep, /init-letsencrypt\.sh/);
   });
 
-  it('bootstrap.sh refuses to start when SHARED_EDGE=1 and the external `edge` network does not exist yet', () => {
+  it('bootstrap.sh refuses to start when SHARED_EDGE=1 and the external `edge-gateway` network does not exist yet', () => {
     const startStep = bootstrapSh.slice(bootstrapSh.indexOf('Pull and start'));
-    assert.match(startStep, /docker network inspect edge/);
+    assert.match(startStep, /docker network inspect edge-gateway/);
     assert.match(startStep, /toon-protocol\/infra#24/);
   });
 
@@ -519,5 +534,38 @@ describe('cert work is skipped under the shared edge (SHARED_EDGE=1)', () => {
 
   it('init-letsencrypt.sh refuses to spend a Let\'s Encrypt call under SHARED_EDGE=1', () => {
     assert.match(initLetsencryptSh, /SHARED_EDGE/);
+  });
+});
+
+// ── The auto-apply units are per node (shared contract v2 point 2) ──────────
+// Several nodes can end up on one host (toon-protocol/infra#25), so a shared
+// systemd instance needs unit names, and a lock path, that do not collide
+// across them -- unqualified `toon-auto-apply.*` no longer ships.
+describe('the auto-apply units are named per node', () => {
+  it('ships toon-auto-apply-gateway.service and .timer, and no unqualified toon-auto-apply.* file', () => {
+    assert.doesNotMatch(read('toon-auto-apply-gateway.service'), /^\s*$/);
+    assert.doesNotMatch(read('toon-auto-apply-gateway.timer'), /^\s*$/);
+    assert.throws(() => read('toon-auto-apply.service'), 'the unqualified unit file must not ship any more');
+    assert.throws(() => read('toon-auto-apply.timer'), 'the unqualified unit file must not ship any more');
+  });
+
+  it('the timer points at the per-node service', () => {
+    assert.match(read('toon-auto-apply-gateway.timer'), /^Unit=toon-auto-apply-gateway\.service$/m);
+  });
+
+  it('bootstrap.sh installs and enables the per-node names, never the unqualified ones', () => {
+    assert.match(bootstrapSh, /install -m 644 toon-auto-apply-gateway\.service \/etc\/systemd\/system\/toon-auto-apply-gateway\.service/);
+    assert.match(bootstrapSh, /install -m 644 toon-auto-apply-gateway\.timer\s+\/etc\/systemd\/system\/toon-auto-apply-gateway\.timer/);
+    assert.match(bootstrapSh, /systemctl enable --now toon-auto-apply-gateway\.timer/);
+    assert.doesNotMatch(bootstrapSh, /toon-auto-apply\.(service|timer)/);
+  });
+
+  it('auto-apply.sh takes its lock at the per-node path by default', () => {
+    assert.match(autoApplySh, /LOCK_FILE=\$\{TOON_AUTOAPPLY_LOCK:-\/var\/lock\/toon-auto-apply-gateway\.lock\}/);
+  });
+
+  it('README documents the one-time migration off the old unqualified units', () => {
+    assert.match(readme, /toon-auto-apply-gateway\.(service|timer)/);
+    assert.match(readme, /systemctl disable --now toon-auto-apply\.timer/);
   });
 });

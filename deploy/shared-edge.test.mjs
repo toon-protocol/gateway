@@ -83,9 +83,11 @@ describe('the shared-edge overlay, merged by docker compose itself', { skip }, (
     const full = config(dir);
     assert.equal(full.status, 0, full.stderr);
     assert.doesNotMatch(full.stdout, /published: "80"|published: "443"/, 'a host port 80 or 443 is bound with the overlay on');
-    assert.match(full.stdout, /aliases:\s*\n\s*- gateway-gw/, 'gateway is not aliased gateway-gw on `edge`');
-    assert.match(full.stdout, /aliases:\s*\n\s*- gateway-proxy/, 'connector is not aliased gateway-proxy on `edge`');
-    assert.match(full.stdout, /edge:\s*\n\s*name: edge\s*\n\s*external: true/, '`edge` is not declared external');
+    assert.match(full.stdout, /aliases:\s*\n\s*- gateway-gw/, 'gateway is not aliased gateway-gw on `edge-gateway`');
+    assert.match(full.stdout, /aliases:\s*\n\s*- gateway-proxy/, 'connector is not aliased gateway-proxy on `edge-gateway`');
+    assert.match(full.stdout, /edge-gateway:\s*\n\s*name: edge-gateway\s*\n\s*external: true/, '`edge-gateway` is not declared external');
+    // Shared contract v2: this node's own network, never the old flat `edge`.
+    assert.doesNotMatch(full.stdout, /\bedge:\s*\n\s*name: edge\s*\n/, 'the merge still names the old flat `edge` network');
     // mem_limit survives the merge as a number of bytes; a per-service
     // presence check, not a value (README documents the values are provisional).
     // Split at each line indented by EXACTLY two spaces (a top-level key) so
@@ -111,6 +113,6 @@ describe('the shared-edge overlay, merged by docker compose itself', { skip }, (
     assert.match(full.stdout, /published: "80"/);
     assert.match(full.stdout, /published: "443"/);
     assert.doesNotMatch(full.stdout, /mem_limit/, 'the default must carry no mem_limit — the overlay was not named');
-    assert.doesNotMatch(full.stdout, /\bedge:\s*\n\s*name: edge/, 'the default must not reference the `edge` network — the overlay was not named');
+    assert.doesNotMatch(full.stdout, /edge-gateway/, 'the default must not reference `edge-gateway` — the overlay was not named');
   });
 });

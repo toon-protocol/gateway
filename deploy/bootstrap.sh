@@ -99,10 +99,10 @@ echo "==> [6/8] Pull and start"
 # will not pull, except the sha-0000000 placeholder, which it builds from this
 # checkout instead (README § "How updates arrive").
 ./pull-images.sh
-if [ "$SHARED_EDGE" = 1 ] && ! docker network inspect edge >/dev/null 2>&1; then
-  echo "FAILED: SHARED_EDGE=1, but the external Docker network \`edge\` does not exist" >&2
-  echo "on this host yet. It is created by the devnet host's edge, not by this bundle" >&2
-  echo "(toon-protocol/infra#24) -- bring that up first, then re-run ./bootstrap.sh." >&2
+if [ "$SHARED_EDGE" = 1 ] && ! docker network inspect edge-gateway >/dev/null 2>&1; then
+  echo "FAILED: SHARED_EDGE=1, but the external Docker network \`edge-gateway\` does not" >&2
+  echo "exist on this host yet. It is created by the devnet host's edge, not by this" >&2
+  echo "bundle (toon-protocol/infra#24) -- bring that up first, then re-run ./bootstrap.sh." >&2
   exit 1
 fi
 docker compose up -d
@@ -123,10 +123,17 @@ echo "==> [8/8] The auto-apply timer"
 # fast-forwards, re-renders and applies. ExecStart is absolute, so the unit
 # only works from the checkout path it names — README § "Standing one up"
 # clones to /root/gateway for exactly that reason.
-install -m 644 toon-auto-apply.service /etc/systemd/system/toon-auto-apply.service
-install -m 644 toon-auto-apply.timer   /etc/systemd/system/toon-auto-apply.timer
+#
+# Named per node (`-gateway`), not `toon-auto-apply.*`: several nodes can end
+# up on one host (toon-protocol/infra#25), and a shared systemd instance needs
+# unit names that do not collide across them. A box already running the old,
+# unqualified `toon-auto-apply.*` units keeps working unchanged -- they point
+# at this same script -- until its cutover migrates it (README §
+# "Running behind the shared edge" has the one-time migration).
+install -m 644 toon-auto-apply-gateway.service /etc/systemd/system/toon-auto-apply-gateway.service
+install -m 644 toon-auto-apply-gateway.timer   /etc/systemd/system/toon-auto-apply-gateway.timer
 systemctl daemon-reload
-systemctl enable --now toon-auto-apply.timer
+systemctl enable --now toon-auto-apply-gateway.timer
 
 echo
 echo "Workload Gateway box up."

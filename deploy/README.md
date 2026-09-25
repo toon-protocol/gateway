@@ -22,7 +22,7 @@ One host, four containers, one wildcard certificate.
 | File | What it is |
 |---|---|
 | `docker-compose.yml` | The four services. The connector's pin lives here and nowhere else. |
-| `docker-compose.shared-edge.yml` | Overlay, off by default (`COMPOSE_FILE` in `.env`): disables `nginx`/`certbot` and joins `gateway`/`connector` to the devnet host's shared `edge` network. § "Running behind the shared edge". |
+| `docker-compose.shared-edge.yml` | Overlay, off by default (`COMPOSE_FILE` in `.env`): disables `nginx`/`certbot` and joins `gateway`/`connector` to this node's own `edge-gateway` network. § "Running behind the shared edge". |
 | `connector.toml.template` | The connector's whole configuration. Rendered; names key paths, holds no secret. |
 | `nginx/node.conf.template` | The two server blocks. Rendered. |
 | `certbot/<provider>.py` | The DNS-01 auth and cleanup hooks, one file per DNS provider: `porkbun.py`, `cloudflare.py`. No plugin, no image of our own. |
@@ -169,9 +169,9 @@ alone, exactly as this bundle always has.
 The overlay disables `nginx` and `certbot` (`profiles: [disabled]` — nothing
 here ever sets `COMPOSE_PROFILES=disabled`, so they never start and bind no
 host port), gives every service a `mem_limit`, and joins `gateway` and
-`connector` to an external Docker network named `edge` — created and owned by
-the host's edge (toon-protocol/infra#24), not by this bundle — under stable
-aliases:
+`connector` to an external Docker network named `edge-gateway` — this node's
+own, created and owned by the host's edge (toon-protocol/infra#24), not by
+this bundle — under stable aliases:
 
 | Alias | Container:port | What it serves | Scheme |
 |---|---|---|---|
@@ -217,21 +217,19 @@ silently:
   ^~ /admin { return 404; }` is nginx's own belt-and-braces, worth keeping on
   the edge too.
 
-**Open question for infra#24, not solved here:** joining `gateway` to `edge`
-makes *every* port it listens on reachable to anything else on `edge`, not
-just 8443 — Docker gives no per-port ACL between containers sharing a bridge
-network, and `expose:` in `docker-compose.yml` is documentation, not
-enforcement. That includes `GATEWAY_HANDOVER_PORT` (8081), which today is
-reachable from nowhere but `connector` on this box's own private network —
-"Privacy and exposure invariants" below is explicit that reaching it directly
-would let someone tell this gateway what to serve without paying its
-connector a packet. Once `edge` is shared by five nodes' containers plus the
-host's Caddy, anything else joined to `edge` (another node's container, or a
-compromised one) can dial `gateway-gw:8081/handover` directly. This bundle
-cannot fix that alone — the shared network is the contract infra#24 sets —
-so it is flagged here rather than silently shipped: infra#24's edge, or a
-host-level rule scoping cross-container traffic on `edge` to the documented
-alias:port pairs, needs to close it before this box actually moves.
+**Resolved: only the edge shares a network with this gateway.** Joining
+`gateway` to a network every other node's containers also sat on would have
+made *every* port it listens on reachable to any of them — Docker gives no
+per-port ACL between containers sharing a bridge network, and `expose:` in
+`docker-compose.yml` is documentation, not enforcement. That would have
+included `GATEWAY_HANDOVER_PORT` (8081), which "Privacy and exposure
+invariants" below is explicit must be reachable from nowhere but `connector`:
+reaching it directly would let someone tell this gateway what to serve
+without paying its connector a packet. So there is no flat `edge` network —
+`edge-gateway` is this node's own, named and owned by the host's edge
+(toon-protocol/infra#24) same as the other four nodes each get their own
+(`edge-relay`, `edge-store`, `edge-gas`, `edge-faucet`); the edge's Caddy
+joins all five, but no node's containers ever sit on another node's network.
 
 `connector`'s existing loopback publish (`127.0.0.1:4000`) is untouched:
 `bootstrap.sh` and `auto-apply.sh` still read `GET /ilp/identity` and
@@ -256,10 +254,24 @@ box yet (toon-protocol/infra#25 step 2). Replace them with real `docker stats`
 numbers once the box is up, and update the overlay's comments when you do.
 
 `bootstrap.sh` refuses, before `docker compose up -d`, if `SHARED_EDGE=1` and
-the external `edge` network does not exist yet — it is created by the host's
-edge (toon-protocol/infra#24), not by this bundle, so bring that up first.
-`auto-apply.sh`'s nginx-reload step is skipped entirely under the overlay
-(nginx never runs, so there is nothing to reload).
+the external `edge-gateway` network does not exist yet — it is created by the
+host's edge (toon-protocol/infra#24), not by this bundle, so bring that up
+first. `auto-apply.sh`'s nginx-reload step is skipped entirely under the
+overlay (nginx never runs, so there is nothing to reload).
+
+**The auto-apply units are per node.** `toon-auto-apply-gateway.service` and
+`.timer` (lock: `/var/lock/toon-auto-apply-gateway.lock`), not the unqualified
+`toon-auto-apply.*` this bundle shipped before — several nodes can end up on
+one host (toon-protocol/infra#25), and a shared systemd instance needs names
+that do not collide across them. A box already running the old, unqualified
+units keeps working unchanged; they point at the same `auto-apply.sh`. At
+cutover (toon-protocol/infra#25), migrate it once:
+
+```bash
+systemctl disable --now toon-auto-apply.timer
+rm /etc/systemd/system/toon-auto-apply.service /etc/systemd/system/toon-auto-apply.timer
+./bootstrap.sh   # installs and enables toon-auto-apply-gateway.{service,timer}
+```
 
 ## Standing one up
 
@@ -426,8 +438,8 @@ Handover to `<ILP_ADDRESS>.handover` at this edge
 
 ## How updates arrive
 
-The box follows a branch. Every five minutes `toon-auto-apply.timer` runs
-`auto-apply.sh`, which fast-forwards the checkout, re-renders the config, pulls
+The box follows a branch. Every five minutes `toon-auto-apply-gateway.timer`
+runs `auto-apply.sh`, which fast-forwards the checkout, re-renders the config, pulls
 both images, brings the stack up, and then **verifies** — the gateway and the
 connector must both report healthy, and the running connector's `GET /ilp`
 must advertise exactly what the rendered config says it should.
@@ -476,9 +488,9 @@ the pinned name. That is what a fork that has not published yet can use. Any
 other pin that will not pull fails the apply.
 
 ```bash
-systemctl status toon-auto-apply.timer
-journalctl -u toon-auto-apply.service -n 50
-systemctl start toon-auto-apply.service   # apply now, rather than waiting
+systemctl status toon-auto-apply-gateway.timer
+journalctl -u toon-auto-apply-gateway.service -n 50
+systemctl start toon-auto-apply-gateway.service   # apply now, rather than waiting
 ```
 
 `TRACK_BRANCH` in `.env` names the branch, defaulting to `main`. It stays a

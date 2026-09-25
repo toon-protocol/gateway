@@ -198,8 +198,8 @@ function autoApply(boxDir) {
     STUB_SERVICES: 'gateway connector nginx certbot',
     STUB_IMAGE_gateway: 'ghcr.io/toon-protocol/gateway:sha-0000000',
     STUB_IMAGE_connector: 'ghcr.io/toon-protocol/connector:rust-2026.09.11.1',
-    // Never the real, root-owned /var/lock/toon-auto-apply.lock -- this is
-    // the one knob auto-apply.sh exposes purely for tests.
+    // Never the real, root-owned /var/lock/toon-auto-apply-gateway.lock --
+    // this is the one knob auto-apply.sh exposes purely for tests.
     TOON_AUTOAPPLY_LOCK: join(boxDir, '.autoapply.lock'),
   };
   const r = spawnSync('bash', [join(boxDir, 'deploy', 'auto-apply.sh')], { env, encoding: 'utf8' });
@@ -287,5 +287,58 @@ describe('a box with no deploy/.applied at all', () => {
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     assert.equal(applied(box), origin.sha, 'the first run writes .applied once the apply is verified healthy');
     assert.match(result.calls, /ps -q gateway/, 'it actually ran the apply, not a silent no-op');
+  });
+});
+
+// ── COMPOSE_FILE (shared contract v2 point 3) ────────────────────────────────
+// auto-apply.sh never re-parses COMPOSE_FILE's own value -- only whether
+// .env sets it at all, read the same careful way TRACK_BRANCH is (a single
+// well-formed line, never the whole .env). Set: no `-f` of its own, so
+// docker compose reads COMPOSE_FILE itself and the shared-edge overlay
+// (toon-protocol/gateway#18) actually takes effect. Unset: this script's own
+// `-f docker-compose.yml` fallback -- today's default, named explicitly
+// rather than left to docker compose's own file-discovery default.
+// pull-images.sh makes its own `docker compose config`/`pull` calls, with no
+// `-f` of its own either way (unaffected by this point -- it always let
+// compose read COMPOSE_FILE from .env, or fall to compose's own default).
+// Only auto-apply.sh's OWN calls -- up/ps/restart/logs/exec -- carry its
+// `${COMPOSE[@]}`, so only those prove point 3.
+const ownCall = (call) => /^compose (?:-f docker-compose\.yml )?(?:up -d|ps -q|restart |logs --tail 40 |exec -T nginx)/.test(call);
+
+describe('COMPOSE_FILE (shared contract v2 point 3)', () => {
+  it('with no COMPOSE_FILE in .env: auto-apply.sh names -f docker-compose.yml itself', () => {
+    const origin = freshOrigin();
+    const box = cloneBox(origin.dir);
+    writeEnv(box, ENV); // .env.example ships COMPOSE_FILE commented out
+
+    const result = autoApply(box);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const calls = result.calls.split('\n').filter(ownCall);
+    assert.ok(calls.length > 0, 'expected at least one of auto-apply.sh\'s own compose calls');
+    for (const call of calls) {
+      assert.match(call, /^compose -f docker-compose\.yml /, `call did not name -f docker-compose.yml: ${call}`);
+    }
+  });
+
+  it('with COMPOSE_FILE set in .env: auto-apply.sh never names its own -f', () => {
+    const origin = freshOrigin();
+    const box = cloneBox(origin.dir);
+    // The overlay file need not exist for this: auto-apply.sh only checks
+    // whether .env SETS the variable, never docker-compose.shared-edge.yml's
+    // own presence or content. SHARED_EDGE=1 satisfies render.sh's own
+    // (unrelated) cross-check so the render this run does still succeeds.
+    writeEnv(box, {
+      ...ENV,
+      SHARED_EDGE: '1',
+      COMPOSE_FILE: 'docker-compose.yml:docker-compose.shared-edge.yml',
+    });
+
+    const result = autoApply(box);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const calls = result.calls.split('\n').filter(ownCall);
+    assert.ok(calls.length > 0, 'expected at least one of auto-apply.sh\'s own compose calls');
+    for (const call of calls) {
+      assert.doesNotMatch(call, /-f\s+docker-compose\.yml/, `call named its own -f despite COMPOSE_FILE in .env: ${call}`);
+    }
   });
 });
