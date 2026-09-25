@@ -161,7 +161,13 @@ if ! ./render.sh; then
 fi
 SUM_AFTER=$(fingerprint_connector_inputs)
 
-COMPOSE=(-f docker-compose.yml)
+# No `-f`: compose reads COMPOSE_FILE from .env, which is how the shared-edge
+# overlay (docker-compose.shared-edge.yml, toon-protocol/gateway#18) adds
+# itself — `docker compose` flags outrank an environment variable, so a
+# hardcoded `-f docker-compose.yml` here would silently run the plain stack
+# on a box whose .env named the overlay. With no COMPOSE_FILE line it is the
+# plain stack either way, because that is what an unset COMPOSE_FILE means.
+COMPOSE=()
 
 # Captured before `up -d` so a recreation is distinguishable: a recreated
 # connector already booted on the just-rendered files and must not be bounced a
@@ -288,7 +294,15 @@ fi
 # change either. It is never restarted -- restarting the TLS front is what the
 # other bundles go out of their way to avoid -- so tell it to reload instead,
 # which re-reads conf.d and the certificate without dropping a connection.
-if [ "$SUM_AFTER" != "$SUM_BEFORE" ] || ! cmp -s nginx/conf.d/node.conf nginx/conf.d/.node.conf.applied 2>/dev/null; then
+#
+# `-f nginx/conf.d/node.conf` first: under SHARED_EDGE=1, render.sh removes
+# that file and docker-compose.shared-edge.yml disables nginx entirely (the
+# devnet host's shared edge fronts this box instead), so there is nothing to
+# reload -- without this guard, `!cmp` reads two missing files as "differ"
+# on every single run and this would try to reload a container that was never
+# started, five minutes apart, forever.
+if [ -f nginx/conf.d/node.conf ] \
+  && { [ "$SUM_AFTER" != "$SUM_BEFORE" ] || ! cmp -s nginx/conf.d/node.conf nginx/conf.d/.node.conf.applied 2>/dev/null; }; then
   docker compose "${COMPOSE[@]}" exec -T nginx nginx -s reload \
     && cp nginx/conf.d/node.conf nginx/conf.d/.node.conf.applied \
     || echo "::warning:: nginx would not reload; check its logs."

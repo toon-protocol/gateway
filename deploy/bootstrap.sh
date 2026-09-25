@@ -22,6 +22,7 @@ set -a; . ./.env; set +a
 : "${EDGE_HOST:?set EDGE_HOST in .env}"
 # render.sh checks the rest of .env, and says which line is wrong; these two are
 # needed before it runs, for the internal certificate.
+SHARED_EDGE=${SHARED_EDGE:-0}
 
 echo "==> Keys and funding"
 # Before anything is installed or started: an unfunded Solana settlement key
@@ -98,10 +99,19 @@ echo "==> [6/8] Pull and start"
 # will not pull, except the sha-0000000 placeholder, which it builds from this
 # checkout instead (README § "How updates arrive").
 ./pull-images.sh
+if [ "$SHARED_EDGE" = 1 ] && ! docker network inspect edge >/dev/null 2>&1; then
+  echo "FAILED: SHARED_EDGE=1, but the external Docker network \`edge\` does not exist" >&2
+  echo "on this host yet. It is created by the devnet host's edge, not by this bundle" >&2
+  echo "(toon-protocol/infra#24) -- bring that up first, then re-run ./bootstrap.sh." >&2
+  exit 1
+fi
 docker compose up -d
 
 echo "==> [7/8] TLS"
-if ! ./init-letsencrypt.sh; then
+if [ "$SHARED_EDGE" = 1 ]; then
+  echo "    none: SHARED_EDGE=1, the devnet host's shared edge terminates TLS for this box" \
+       "(toon-protocol/infra#24)."
+elif ! ./init-letsencrypt.sh; then
   echo "FAILED: certificate issuance did not succeed (its message is above, naming the" >&2
   echo "likely cause). Everything up to here already applied. Fix it, then re-run:" >&2
   echo "  cd $(pwd) && ./init-letsencrypt.sh" >&2

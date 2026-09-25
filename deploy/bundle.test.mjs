@@ -23,7 +23,16 @@
 //   * `GATEWAY_DIAL_REWRITE`, which is the sandbox's one line that would be
 //     wrong here;
 //   * healthchecks dialling 127.0.0.1, because "localhost" in a container can
-//     resolve to ::1, where an IPv4-bound listener never answers.
+//     resolve to ::1, where an IPv4-bound listener never answers;
+//   * the shared-edge overlay (toon-protocol/gateway#18): nginx and certbot
+//     disabled, `gateway`/`connector` joined to the external `edge` network
+//     under their stable aliases, a mem_limit on every service, and the
+//     default (no overlay named) left byte-for-byte unchanged;
+//   * every script naming `-f docker-compose.yml` nowhere, so `COMPOSE_FILE`
+//     in `.env` — not a script flag — is what picks the overlay;
+//   * SHARED_EDGE named everywhere cert work has to stop for it (render.sh,
+//     bootstrap.sh, auto-apply.sh's nginx reload) — shape-checked here, run
+//     for real in render.test.mjs and init-letsencrypt.test.mjs.
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -39,6 +48,10 @@ const nginxConf = read('nginx/node.conf.template');
 const envExample = read('.env.example');
 const gitignore = read('.gitignore');
 const renderSh = read('render.sh');
+const sharedEdge = read('docker-compose.shared-edge.yml');
+const autoApplySh = read('auto-apply.sh');
+const bootstrapSh = read('bootstrap.sh');
+const initLetsencryptSh = read('init-letsencrypt.sh');
 
 // ── The literals this bundle is ───────────────────────────────────────────
 // The route and the address are templated off ILP_ADDRESS, so what is held
@@ -375,5 +388,136 @@ describe('nothing secret is committable', () => {
     const certbotBlock = compose.slice(compose.indexOf('  certbot:'), compose.indexOf('\nvolumes:'));
     assert.match(certbotBlock, /^\s+env_file: dns-01\.env$/m);
     assert.doesNotMatch(certbotBlock, /env_file:\s*\.\/?\.env\b|PORKBUN|CLOUDFLARE/);
+  });
+});
+
+// ── The shared-edge overlay (toon-protocol/gateway#18, infra#24, infra#25) ──
+// docker-compose.yml is the DEFAULT; this overlay is only ever additive, and
+// only when a .env names it in COMPOSE_FILE. Every assertion below is about
+// the overlay file alone, or about docker-compose.yml staying exactly what it
+// was, so a regression in either direction fails here.
+describe('the shared-edge overlay', () => {
+  it('is named exactly the way the provider bundle names its own overlay', () => {
+    // COMPOSE_FILE=docker-compose.yml:docker-compose.shared-edge.yml — the same
+    // colon-joined pattern `git -C provider show origin/main:deploy/docker-compose.hidden.yml`
+    // uses, so docker compose (which reads COMPOSE_FILE out of .env itself)
+    // needs no `-f` from any script in this bundle.
+    assert.match(sharedEdge, /COMPOSE_FILE=docker-compose\.yml:docker-compose\.shared-edge\.yml/);
+  });
+
+  it('disables nginx and certbot, so neither runs and neither binds a host port', () => {
+    const blocks = sharedEdge.split(/\n(?=  \S)/);
+    for (const name of ['nginx', 'certbot']) {
+      const block = blocks.find((b) => b.startsWith(`  ${name}:`));
+      assert.ok(block, `no ${name}: service in the overlay`);
+      assert.match(block, /profiles:\s*\[disabled\]/, `${name} is not disabled`);
+    }
+  });
+
+  it('joins the gateway to `edge` under gateway-gw, the alias the shared edge dials for gw.devnet and *.gw.devnet', () => {
+    const gatewayBlock = sharedEdge.slice(sharedEdge.indexOf('\n  gateway:'), sharedEdge.indexOf('\n  connector:'));
+    assert.match(gatewayBlock, /networks:\s*\n\s+default:\s*\{\}\s*\n\s+edge:\s*\n\s+aliases:\s*\[gateway-gw\]/);
+  });
+
+  it('joins the connector to `edge` under gateway-proxy, the alias the shared edge dials for proxy.gateway.devnet', () => {
+    const connectorBlock = sharedEdge.slice(sharedEdge.indexOf('\n  connector:'), sharedEdge.indexOf('\n  nginx:'));
+    assert.match(connectorBlock, /networks:\s*\n\s+default:\s*\{\}\s*\n\s+edge:\s*\n\s+aliases:\s*\[gateway-proxy\]/);
+  });
+
+  it('declares `edge` as the external network the host edge owns, not one this bundle creates', () => {
+    assert.match(sharedEdge, /^networks:\n\s+edge:\n\s+external:\s*true\s*$/m);
+  });
+
+  it('gives every service a mem_limit, each marked provisional', () => {
+    // Split the file into blocks at each line indented by EXACTLY two spaces
+    // (`  name:`) — a line indented further is that service's own content, so
+    // this cuts the file into one chunk per top-level key (`networks:`,
+    // `gateway:`, `connector:`, `nginx:`, `certbot:`).
+    const blocks = sharedEdge.split(/\n(?=  \S)/);
+    for (const name of ['gateway', 'connector', 'nginx', 'certbot']) {
+      const block = blocks.find((b) => b.startsWith(`  ${name}:`));
+      assert.ok(block, `no ${name}: service in the overlay`);
+      assert.match(block, /mem_limit:\s*\d+[mg]/i, `${name} has no mem_limit`);
+      assert.match(block, /provisional — replace with docker stats measurements \(toon-protocol\/infra#25 step 2\)/, `${name}'s mem_limit is not marked provisional`);
+    }
+  });
+
+  it('never gives docker-compose.yml a mem_limit, a profile or a networks: section of its own — the default is unchanged', () => {
+    assert.doesNotMatch(compose, /^\s*mem_limit:/m);
+    assert.doesNotMatch(compose, /^\s*profiles:/m);
+    assert.doesNotMatch(compose, /^networks:/m);
+  });
+
+  it('never edits docker-compose.yml\'s own port publishes — the default still binds 80 and 443 with no overlay named', () => {
+    assert.match(compose, /- '80:80'/);
+    assert.match(compose, /- '443:443'/);
+  });
+});
+
+describe('scripts respect COMPOSE_FILE (the shared-edge overlay is a .env line, not a script flag)', () => {
+  it('auto-apply.sh names no docker-compose.yml of its own, so COMPOSE_FILE in .env picks the stack', () => {
+    // The bug this guards: an explicit `-f docker-compose.yml` on every
+    // `docker compose` call would outrank COMPOSE_FILE from .env (compose
+    // flags win over the environment), so a box with the overlay named in
+    // .env would still only ever run the plain stack. No `-f` anywhere in
+    // this script is what lets bootstrap.sh, pull-images.sh, an operator's own
+    // `docker compose ps` and this script all agree on what is running.
+    assert.doesNotMatch(autoApplySh, /^COMPOSE=\(-f\s+docker-compose\.yml\)/m);
+    assert.match(autoApplySh, /^COMPOSE=\(\)$/m);
+  });
+
+  for (const name of ['bootstrap.sh', 'pull-images.sh', 'init-letsencrypt.sh']) {
+    it(`${name} names no docker-compose.yml of its own either`, () => {
+      assert.doesNotMatch(read(name), /-f\s+docker-compose\.yml/);
+    });
+  }
+});
+
+// This describe block is a SHAPE check only: it holds that each script names
+// SHARED_EDGE at all, and where. The actual runtime behaviour — render.sh
+// really skipping DNS_PROVIDER and really removing a stale dns-01.env /
+// nginx conf, and init-letsencrypt.sh really touching no docker call — is run
+// for real, against the real scripts, in render.test.mjs's "SHARED_EDGE"
+// describe block and init-letsencrypt.test.mjs's SHARED_EDGE=1 case
+// respectively. bootstrap.sh has no real-execution harness anywhere in this
+// suite (it provisions a host: ufw, docker, systemd), so its SHARED_EDGE
+// check stays a shape check here, same depth as every other bootstrap.sh
+// assertion in this file.
+describe('cert work is skipped under the shared edge (SHARED_EDGE=1)', () => {
+  it('render.sh cross-checks SHARED_EDGE against COMPOSE_FILE, the way the provider bundle checks HIDDEN', () => {
+    assert.match(renderSh, /SHARED_EDGE/);
+    assert.match(renderSh, /docker-compose\.shared-edge\.yml/);
+    assert.match(renderSh, /COMPOSE_FILE/);
+  });
+
+  it('render.sh names the DNS_PROVIDER requirement as conditional on SHARED_EDGE (render.test.mjs proves the behaviour)', () => {
+    const guarded = renderSh.slice(renderSh.indexOf('DNS_PROVIDER:?'));
+    assert.match(guarded, /SHARED_EDGE/);
+  });
+
+  it('bootstrap.sh skips init-letsencrypt.sh under SHARED_EDGE=1', () => {
+    assert.match(bootstrapSh, /SHARED_EDGE/);
+    const tlsStep = bootstrapSh.slice(bootstrapSh.indexOf('TLS'));
+    assert.match(tlsStep, /SHARED_EDGE.*=.*1/);
+    assert.match(tlsStep, /init-letsencrypt\.sh/);
+  });
+
+  it('bootstrap.sh refuses to start when SHARED_EDGE=1 and the external `edge` network does not exist yet', () => {
+    const startStep = bootstrapSh.slice(bootstrapSh.indexOf('Pull and start'));
+    assert.match(startStep, /docker network inspect edge/);
+    assert.match(startStep, /toon-protocol\/infra#24/);
+  });
+
+  it('auto-apply.sh never tries to reload a disabled nginx under SHARED_EDGE=1', () => {
+    // The bug this guards: render.sh removes nginx/conf.d/node.conf under
+    // SHARED_EDGE=1, so an unguarded `!cmp` of two missing files reads as
+    // "differs" on every run and would try to reload a container that was
+    // never started, every five minutes, forever.
+    const reloadStep = autoApplySh.slice(autoApplySh.indexOf('nginx holds the rendered server names'));
+    assert.match(reloadStep, /if\s*\[\s*-f\s+nginx\/conf\.d\/node\.conf\s*\]/);
+  });
+
+  it('init-letsencrypt.sh refuses to spend a Let\'s Encrypt call under SHARED_EDGE=1', () => {
+    assert.match(initLetsencryptSh, /SHARED_EDGE/);
   });
 });

@@ -22,6 +22,7 @@ One host, four containers, one wildcard certificate.
 | File | What it is |
 |---|---|
 | `docker-compose.yml` | The four services. The connector's pin lives here and nowhere else. |
+| `docker-compose.shared-edge.yml` | Overlay, off by default (`COMPOSE_FILE` in `.env`): disables `nginx`/`certbot` and joins `gateway`/`connector` to the devnet host's shared `edge` network. § "Running behind the shared edge". |
 | `connector.toml.template` | The connector's whole configuration. Rendered; names key paths, holds no secret. |
 | `nginx/node.conf.template` | The two server blocks. Rendered. |
 | `certbot/<provider>.py` | The DNS-01 auth and cleanup hooks, one file per DNS provider: `porkbun.py`, `cloudflare.py`. No plugin, no image of our own. |
@@ -32,7 +33,7 @@ One host, four containers, one wildcard certificate.
 | `init-letsencrypt.sh` | Issues or reuses the certificate. Idempotent. |
 | `auto-apply.sh` + the two units | The box half of GitOps: follow the branch, apply what merged. |
 | `.env.example` | Every variable, with what it is and how to generate it. |
-| `bundle.test.mjs`, `render.test.mjs`, `dns01.test.mjs`, `pull-images.test.mjs`, `keys.test.mjs` | The guard: the real files above, `render.sh` run for real, the DNS hooks against a stub API, `pull-images.sh` against a stub `docker`, and `keys.sh`'s addresses against the connector's own derivation. `npm run test:deploy`. |
+| `bundle.test.mjs`, `render.test.mjs`, `dns01.test.mjs`, `pull-images.test.mjs`, `keys.test.mjs`, `auto-apply.test.mjs`, `init-letsencrypt.test.mjs`, `shared-edge.test.mjs` | The guard: the real files above, `render.sh`/`auto-apply.sh`/`init-letsencrypt.sh` run for real against stubbed `docker`, the DNS hooks against a stub API, `pull-images.sh` against a stub `docker`, `keys.sh`'s addresses against the connector's own derivation, and the shared-edge overlay merged by a real `docker compose config` (needs `docker compose` on the machine running the suite; skips itself otherwise). `npm run test:deploy`. |
 | `testdata/` | What the devnet box rendered before its values moved to `.env`; `render.test.mjs` holds the devnet preset to it byte for byte. |
 
 `.env`, the rendered `connector.toml`, `operator-bearer.token`,
@@ -146,6 +147,119 @@ renewal must not be able to cause that.
 The self-signed certificate is presented only to nginx, on this host's compose
 network, which does not verify it. It is issued for twenty years on purpose:
 expiring it would be a scheduled outage bought for nothing.
+
+## Running behind the shared edge
+
+The devnet is moving onto one Linode, where the relay, store, gas station,
+this gateway and the faucet all share one host behind one Caddy that owns 80
+and 443 (toon-protocol/infra#24, infra ADR 0001). Every node keeps its own
+connector, keys and hostnames — only its own TLS front goes away. For this
+box, that is `docker-compose.shared-edge.yml`, an **overlay**, turned on by
+two lines in `.env` (never edit the overlay file itself):
+
+```
+SHARED_EDGE=1
+COMPOSE_FILE=docker-compose.yml:docker-compose.shared-edge.yml
+```
+
+`render.sh` refuses a `.env` where the two disagree. **The default is
+unchanged**: a `.env` with no `COMPOSE_FILE` line runs `docker-compose.yml`
+alone, exactly as this bundle always has.
+
+The overlay disables `nginx` and `certbot` (`profiles: [disabled]` — nothing
+here ever sets `COMPOSE_PROFILES=disabled`, so they never start and bind no
+host port), gives every service a `mem_limit`, and joins `gateway` and
+`connector` to an external Docker network named `edge` — created and owned by
+the host's edge (toon-protocol/infra#24), not by this bundle — under stable
+aliases:
+
+| Alias | Container:port | What it serves | Scheme |
+|---|---|---|---|
+| `gateway-gw` | `gateway:8443` | `gw.devnet.toonprotocol.dev`, `*.gw.devnet.toonprotocol.dev` | HTTPS, self-signed (the internal certificate above) |
+| `gateway-proxy` | `connector:4000` | `proxy.gateway.devnet.toonprotocol.dev` | plain HTTP |
+
+This is exactly what this box's own `nginx` proxies to today
+(`nginx/node.conf.template`), so the host's edge has to replicate the same
+handful of things nginx does beyond a plain proxy, or something regresses
+silently:
+
+* **`gateway-gw` is HTTPS, not HTTP**, and must stay that way. The gateway
+  decides the `X-Forwarded-Proto` it hands a workload from *which of its own
+  listeners* the connection arrived on, not from a header (see "The internal
+  TLS hop" above) — a plain-HTTP hop here would tell every workload `http`
+  while the visitor was on `https`. Dial it with certificate verification
+  off and SNI set to the upstream name (nginx: `proxy_ssl_verify off`,
+  `proxy_ssl_server_name on`, `proxy_ssl_name $upstream`) — the peer is a
+  long-lived self-signed certificate on a private network, with nothing to
+  verify it against.
+* **`X-Forwarded-Proto: https`** on both upstreams. The gateway does not read
+  this header for its own proto decision (above), but the connector's
+  advertised endpoints and anything else downstream that does read forwarded
+  headers must keep seeing it.
+* **`Host` passed through unchanged** (`proxy_set_header Host $host;`). The
+  gateway keys every workload off `Host`; rewriting it would make every
+  workload see the edge's idea of its own name instead of the one the visitor
+  typed.
+* **The `no_grant` 503 must reach the client unchanged.** A hostname this
+  gateway holds no grant for answers `503` with header
+  `toon-gateway-reason: no_grant` — the healthy, empty state
+  (`docs/devnet.md`) — and this is a plain response header, not anything
+  hop-specific; the edge must not strip or rewrite it.
+* **WebSocket upgrades** (`Upgrade`, `Connection`) on both upstreams — a
+  workload is an arbitrary HTTP app.
+* **Generous timeouts and body sizes** on `gateway-gw`: nginx's
+  `proxy_read_timeout`/`proxy_send_timeout 1h` and
+  `client_max_body_size 64m`, because a workload can be a long poll or an
+  upload. `gateway-proxy` (the sealed ILP edge) uses `proxy_read_timeout 1h`
+  and `client_max_body_size 1m` — the handover payload is small.
+* **`gateway-proxy` never gets a bare `Host` route.** It answers exactly the
+  one name (`proxy.gateway.devnet.toonprotocol.dev`, `EDGE_HOST`); `location
+  ^~ /admin { return 404; }` is nginx's own belt-and-braces, worth keeping on
+  the edge too.
+
+**Open question for infra#24, not solved here:** joining `gateway` to `edge`
+makes *every* port it listens on reachable to anything else on `edge`, not
+just 8443 — Docker gives no per-port ACL between containers sharing a bridge
+network, and `expose:` in `docker-compose.yml` is documentation, not
+enforcement. That includes `GATEWAY_HANDOVER_PORT` (8081), which today is
+reachable from nowhere but `connector` on this box's own private network —
+"Privacy and exposure invariants" below is explicit that reaching it directly
+would let someone tell this gateway what to serve without paying its
+connector a packet. Once `edge` is shared by five nodes' containers plus the
+host's Caddy, anything else joined to `edge` (another node's container, or a
+compromised one) can dial `gateway-gw:8081/handover` directly. This bundle
+cannot fix that alone — the shared network is the contract infra#24 sets —
+so it is flagged here rather than silently shipped: infra#24's edge, or a
+host-level rule scoping cross-container traffic on `edge` to the documented
+alias:port pairs, needs to close it before this box actually moves.
+
+`connector`'s existing loopback publish (`127.0.0.1:4000`) is untouched:
+`bootstrap.sh` and `auto-apply.sh` still read `GET /ilp/identity` and
+`GET /ilp` there locally, whether or not the overlay is on.
+
+**No certificate work happens on this box under the overlay.** `render.sh`
+skips DNS_PROVIDER and its credentials entirely and renders neither
+`dns-01.env` nor `nginx/conf.d/node.conf` (removing them if a box had them
+from before the switch was flipped); `bootstrap.sh` skips
+`./init-letsencrypt.sh`; and `init-letsencrypt.sh` itself refuses to spend a
+Let's Encrypt call and exits 0 immediately. The wildcard for
+`*.gw.devnet.toonprotocol.dev` over DNS-01 via Porkbun is issued by the host's
+edge instead (toon-protocol/infra#24).
+
+`docker-compose.yml`'s `gateway` service is still built on the box while its
+pin is the `sha-0000000` placeholder (`pull-images.sh`, from `../Dockerfile`,
+build context `..`) — the overlay does not touch that; it only adds network
+membership and a memory limit to the same service.
+
+`mem_limit`s in the overlay are **provisional**: nobody has measured the live
+box yet (toon-protocol/infra#25 step 2). Replace them with real `docker stats`
+numbers once the box is up, and update the overlay's comments when you do.
+
+`bootstrap.sh` refuses, before `docker compose up -d`, if `SHARED_EDGE=1` and
+the external `edge` network does not exist yet — it is created by the host's
+edge (toon-protocol/infra#24), not by this bundle, so bring that up first.
+`auto-apply.sh`'s nginx-reload step is skipped entirely under the overlay
+(nginx never runs, so there is nothing to reload).
 
 ## Standing one up
 
