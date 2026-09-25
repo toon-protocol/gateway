@@ -146,7 +146,7 @@ describe('settlement', () => {
   it('presets Base Sepolia through the registry, against the 6dp mock USDC', () => {
     assert.match(envExample, /^SETTLEMENT_EVM_RPC_URL=https:\/\/base-sepolia-rpc\.publicnode\.com$/m);
     assert.match(envExample, /^SETTLEMENT_EVM_REGISTRY=0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5$/m);
-    assert.match(envExample, /^SETTLEMENT_EVM_TOKEN=0x49beE1Bca5d15Fb0963117923403F9498119a9Ce$/m);
+    assert.match(envExample, /^SETTLEMENT_EVM_TOKEN=0x0C996d7c934c79a6255254875607Fe69df25C0E1$/m);
   });
 
   it('presets Solana devnet against the deployed payment-channel program', () => {
