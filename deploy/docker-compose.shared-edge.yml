@@ -33,9 +33,18 @@
 #   connector        joins `edge-gateway` under the alias `gateway-proxy`, so
 #                    the edge reaches the sealed ILP door at
 #                    `gateway-proxy:4000` — plain HTTP, same as nginx's own
-#                    upstream today. Its existing loopback publish
-#                    (127.0.0.1:4000) is untouched: bootstrap.sh and
-#                    auto-apply.sh still read it locally.
+#                    upstream today. Its loopback publish MOVES to
+#                    127.0.0.1:4001:4000 (`ports: !override`, below): every
+#                    node bundle's own docker-compose.yml publishes its
+#                    connector on 127.0.0.1:4000, and on a shared host those
+#                    collide — a real outage (toon-protocol/infra#25). The
+#                    container port stays 4000; only the host side moves, to
+#                    this node's own assignment. `!override` replaces the
+#                    whole `ports:` list rather than merging into it, so 4001
+#                    is the ONLY thing published once the overlay is on.
+#                    auto-apply.sh reads whichever port is actually
+#                    published (it never hardcodes 4000), so it still finds
+#                    the connector locally either way.
 #   mem_limit        added to every service. The devnet host turned out to be
 #                    a 1 GB Linode nanode (961 MB total, ~350 MB used by
 #                    OS/Docker before any node starts), not the 2 GB host
@@ -95,6 +104,15 @@ services:
         aliases: [gateway-proxy]
     # measured idle 7 MB on 2026-09-25 (toon-protocol/infra#25 step 2); limit ≈4× idle
     mem_limit: 64m
+    # Shared host, one connector loopback port each (toon-protocol/infra#25):
+    # docker-compose.yml publishes every node's connector on 127.0.0.1:4000,
+    # which collided the day two nodes landed on the same box. `!override`
+    # (Compose >=2.24) replaces the whole `ports:` list rather than merging
+    # into it, so 4001 is this node's ONLY publish under the overlay. The
+    # container side stays 4000 — nothing inside the container, including its
+    # own healthcheck, changes.
+    ports: !override
+      - '127.0.0.1:4001:4000'
 
   nginx:
     profiles: [disabled]

@@ -231,9 +231,26 @@ without paying its connector a packet. So there is no flat `edge` network —
 (`edge-relay`, `edge-store`, `edge-gas`, `edge-faucet`); the edge's Caddy
 joins all five, but no node's containers ever sit on another node's network.
 
-`connector`'s existing loopback publish (`127.0.0.1:4000`) is untouched:
+**`connector`'s loopback publish moves to `127.0.0.1:4001:4000`** under the
+overlay (`ports: !override` in `docker-compose.shared-edge.yml`). Without the
+overlay it is still `127.0.0.1:4000:4000`, unchanged. This node's own
+docker-compose.yml publishes 4000 like every other bundle's does, and once
+several nodes share one host those collide — a real outage
+(toon-protocol/infra#25). The container port stays 4000 (the healthcheck
+inside the container is untouched); only the host side moves, to this node's
+own assignment:
+
+| Node | Host loopback port |
+|---|---|
+| relay | `127.0.0.1:3000` |
+| gateway | `127.0.0.1:4001` |
+| gas-station | `127.0.0.1:4002` |
+| store | `127.0.0.1:4003` |
+
 `bootstrap.sh` and `auto-apply.sh` still read `GET /ilp/identity` and
-`GET /ilp` there locally, whether or not the overlay is on.
+`GET /ilp` on the loopback locally, whether or not the overlay is on —
+`auto-apply.sh` reads whichever port is actually published (from whichever
+compose files `COMPOSE_FILE` names) rather than assuming 4000.
 
 **No certificate work happens on this box under the overlay.** `render.sh`
 skips DNS_PROVIDER and its credentials entirely and renders neither
@@ -535,7 +552,8 @@ directly would be a way to tell this gateway what to serve without paying its
 connector a packet — which is the one thing the connector exists to prevent.
 
 **The connector's edge is loopback-published.** `127.0.0.1:4000:4000`. nginx is
-what faces the internet.
+what faces the internet. Under the shared-edge overlay this moves to
+`127.0.0.1:4001:4000` — see "Running behind the shared edge" above.
 
 **`ports:` bypasses ufw.** Docker manages its own iptables rules ahead of
 ufw's, so a container published with `ports:` is reachable from the internet
