@@ -42,6 +42,7 @@ set -a; . ./.env; set +a
 : "${SETTLEMENT_EVM_REGISTRY:?set SETTLEMENT_EVM_REGISTRY in .env (.env.example has the devnet preset)}"
 : "${SETTLEMENT_EVM_TOKEN:?set SETTLEMENT_EVM_TOKEN in .env (.env.example has the devnet preset)}"
 : "${SETTLEMENT_EVM_DECIMALS:?set SETTLEMENT_EVM_DECIMALS in .env (.env.example has the devnet preset)}"
+: "${SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK:?set SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK in .env (.env.example has the devnet preset)}"
 : "${SETTLEMENT_SOLANA_RPC_URL:?set SETTLEMENT_SOLANA_RPC_URL in .env (.env.example has the devnet preset)}"
 : "${SETTLEMENT_SOLANA_PROGRAM_ID:?set SETTLEMENT_SOLANA_PROGRAM_ID in .env (.env.example has the devnet preset)}"
 : "${SETTLEMENT_SOLANA_TOKEN:?set SETTLEMENT_SOLANA_TOKEN in .env (.env.example has the devnet preset)}"
@@ -164,7 +165,7 @@ done
 # `#:` lines are notes on the template itself and are dropped here, before
 # envsubst, so a note may mention a ${VARIABLE} without it being substituted.
 sed '/^#:/d' connector.toml.template \
-  | envsubst '${EDGE_HOST} ${GATEWAY_DOMAIN} ${ILP_ADDRESS} ${SETTLEMENT_EVM_RPC_URL} ${SETTLEMENT_EVM_REGISTRY} ${SETTLEMENT_EVM_TOKEN} ${SETTLEMENT_EVM_DECIMALS} ${SETTLEMENT_SOLANA_RPC_URL} ${SETTLEMENT_SOLANA_PROGRAM_ID} ${SETTLEMENT_SOLANA_TOKEN} ${SETTLEMENT_SOLANA_DECIMALS}' \
+  | envsubst '${EDGE_HOST} ${GATEWAY_DOMAIN} ${ILP_ADDRESS} ${SETTLEMENT_EVM_RPC_URL} ${SETTLEMENT_EVM_REGISTRY} ${SETTLEMENT_EVM_TOKEN} ${SETTLEMENT_EVM_DECIMALS} ${SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK} ${SETTLEMENT_SOLANA_RPC_URL} ${SETTLEMENT_SOLANA_PROGRAM_ID} ${SETTLEMENT_SOLANA_TOKEN} ${SETTLEMENT_SOLANA_DECIMALS}' \
   > connector.toml
 
 # ── The DNS-01 hook's environment ────────────────────────────────────────────

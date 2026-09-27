@@ -139,6 +139,10 @@ describe('settlement', () => {
     }
     assert.match(connectorToml, /^decimals\s*=\s*\$\{SETTLEMENT_EVM_DECIMALS\}$/m);
     assert.match(connectorToml, /^decimals\s*=\s*\$\{SETTLEMENT_SOLANA_DECIMALS\}$/m);
+    assert.match(
+      connectorToml,
+      /^channel_index_from_block\s*=\s*\$\{SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK\}$/m
+    );
     // No literal chain value is left behind in the template to disagree with .env.
     assert.doesNotMatch(connectorToml.replace(/^#.*$/gm, ''), /0x[0-9a-fA-F]{40}|devnet|sepolia/i);
   });
@@ -147,6 +151,18 @@ describe('settlement', () => {
     assert.match(envExample, /^SETTLEMENT_EVM_RPC_URL=https:\/\/base-sepolia-rpc\.publicnode\.com$/m);
     assert.match(envExample, /^SETTLEMENT_EVM_REGISTRY=0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5$/m);
     assert.match(envExample, /^SETTLEMENT_EVM_TOKEN=0x0C996d7c934c79a6255254875607Fe69df25C0E1$/m);
+  });
+
+  it('backfills the channel index from the live TokenNetwork deploy block, not genesis', () => {
+    // TOON_Network#182: [settlement.evm] channel_index_from_block (connector
+    // issue #661) defaults to 0, and SETTLEMENT_EVM_RPC_URL's preset prunes
+    // history well short of genesis, so a cold connector never warms its
+    // local channel index up and pays a direct chain read for every channel
+    // lookup instead. 47285026 is the deploy block of the TokenNetwork
+    // SETTLEMENT_EVM_REGISTRY/SETTLEMENT_EVM_TOKEN above resolve to (connector
+    // packages/contracts/deployments/base-sepolia.md, the 2026-09-25 USDC
+    // cutover's createTokenNetwork transaction).
+    assert.match(envExample, /^SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK=47285026$/m);
   });
 
   it('presets Solana devnet against the deployed payment-channel program', () => {
