@@ -110,10 +110,16 @@ price       = 0
 #: are kept word for word so its rendering does not change; on any other
 #: chain, what your .env says is what the connector checks at boot.
 [settlement.evm]
-rpc_url          = "${SETTLEMENT_EVM_RPC_URL}"
-contract_address = "${SETTLEMENT_EVM_REGISTRY}"  # TokenNetworkRegistry
-token_address    = "${SETTLEMENT_EVM_TOKEN}"  # mock USDC (6dp)
-decimals         = ${SETTLEMENT_EVM_DECIMALS}
+rpc_url                  = "${SETTLEMENT_EVM_RPC_URL}"
+contract_address         = "${SETTLEMENT_EVM_REGISTRY}"  # TokenNetworkRegistry
+token_address            = "${SETTLEMENT_EVM_TOKEN}"  # mock USDC (6dp)
+decimals                 = ${SETTLEMENT_EVM_DECIMALS}
+# The local channel index (connector issue #661) backfills
+# ChannelOpened/ChannelNewDeposit/ChannelSettled logs from here on a cold
+# start with no checkpoint, rather than from genesis against a public RPC
+# that prunes history (TOON_Network#182); .env.example says which block for
+# the devnet preset and why.
+channel_index_from_block = ${SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK}
 
 [settlement.evm.key]
 key_file = "/app/data/settlement.key"
