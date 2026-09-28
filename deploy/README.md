@@ -538,11 +538,11 @@ before the build that requires it.** Here the pin and the config it was
 validated against are the same commit and the box takes both with one
 fast-forward, so a build can never reach this box ahead of the config it needs.
 
-The current pin is `rust-2026.09.11.1` (= `rust-sha-f278cd6`), the build the
-sandbox proves this gateway and its provider against end to end. The rest of
-the devnet fleet is a release behind on `rust-2026.08.28.1`; the 09.11 release
-is purely additive to the config schema (`[[tokens]]`, `[[rates]]`,
-`socks_proxy`, all optional and all absent here), so the two interoperate.
+The current pin is `rust-2026.09.27.2` (= `rust-sha-bdec037`), the build the
+rest of the devnet fleet (relay, store, gas-station) runs. Everything the
+09.27 releases add to the config schema — `rpc_via_socks_proxy` and the x402
+batch-settlement tables — is optional and absent here, so this bundle's
+`connector.toml` loads unchanged.
 
 ## Privacy and exposure invariants
 
