@@ -7,7 +7,7 @@
 // fixed test keys that hold nothing, and never by keys.py:
 //
 //   * keyids: `docker run --rm -v "$PWD:/d:ro"
-//     ghcr.io/toon-protocol/connector:rust-2026.09.11.1 send --operator-key
+//     ghcr.io/toon-protocol/connector:rust-2026.09.27.2 send --operator-key
 //     /d/<file> --print-keyid`, this bundle's own connector pin.
 //     settlement-solana.key goes through the same ed25519 expansion
 //     (`read_settlement_key_bytes` -> solana-sdk `keypair_from_seed`), and the

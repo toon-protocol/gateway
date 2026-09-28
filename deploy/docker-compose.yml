@@ -121,7 +121,7 @@ services:
     # runs), so the connector moves by a reviewed commit here: this tag and
     # the matching literal in deploy/bundle.test.mjs, together.
     # README § "Bumping the connector pin".
-    image: ghcr.io/toon-protocol/connector:rust-2026.09.11.1
+    image: ghcr.io/toon-protocol/connector:rust-2026.09.27.2
     command: ['/app/config/connector.toml']
     volumes:
       - ./connector.toml:/app/config/connector.toml:ro
