@@ -65,7 +65,7 @@ const ILP_ADDRESS = '${ILP_ADDRESS}';
 const HANDOVER_ROUTE = '${ILP_ADDRESS}.handover';
 const HANDOVER_PORT = '8081';
 const HANDOVER_HANDLER = 'http://gateway:8081/handover';
-const CONNECTOR_PIN = 'ghcr.io/toon-protocol/connector:rust-2026.09.27.2';
+const CONNECTOR_PIN = 'ghcr.io/toon-protocol/connector:rust-2026.09.28.1';
 // An immutable build: a dated release alias or an exact commit. Never
 // `rust-main`, and never the retired `rust-release` pointer.
 const IMMUTABLE_PIN = /:(rust-sha-[0-9a-f]{7,40}|rust-\d{4}\.\d{2}\.\d{2}\.\d+)$/;
@@ -126,13 +126,13 @@ describe('[node] — what this box says it is', () => {
 });
 
 describe('settlement', () => {
-  it('takes every chain, contract, token and RPC from .env', () => {
+  it('takes every chain, token, RPC and x402 term from .env', () => {
     for (const [key, name] of [
       ['rpc_url', 'SETTLEMENT_EVM_RPC_URL'],
-      ['contract_address', 'SETTLEMENT_EVM_REGISTRY'],
       ['token_address', 'SETTLEMENT_EVM_TOKEN'],
+      ['asset_eip712_name', 'SETTLEMENT_EVM_EIP712_NAME'],
+      ['asset_eip712_version', 'SETTLEMENT_EVM_EIP712_VERSION'],
       ['rpc_url', 'SETTLEMENT_SOLANA_RPC_URL'],
-      ['program_id', 'SETTLEMENT_SOLANA_PROGRAM_ID'],
       ['token_address', 'SETTLEMENT_SOLANA_TOKEN'],
     ]) {
       assert.match(connectorToml, new RegExp(`^${key}\\s*=\\s*"\\$\\{${name}\\}"`, 'm'));
@@ -141,34 +141,46 @@ describe('settlement', () => {
     assert.match(connectorToml, /^decimals\s*=\s*\$\{SETTLEMENT_SOLANA_DECIMALS\}$/m);
     assert.match(
       connectorToml,
-      /^channel_index_from_block\s*=\s*\$\{SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK\}$/m
+      /^min_sponsored_deposit\s*=\s*\$\{SETTLEMENT_SOLANA_MIN_SPONSORED_DEPOSIT\}$/m
     );
     // No literal chain value is left behind in the template to disagree with .env.
     assert.doesNotMatch(connectorToml.replace(/^#.*$/gm, ''), /0x[0-9a-fA-F]{40}|devnet|sepolia/i);
+    // The x402 contract/program are fixed binary constants now (ADR 0075):
+    // no contract_address or program_id key survives anywhere in the template.
+    assert.doesNotMatch(
+      connectorToml.replace(/^\s*#.*$/gm, ''),
+      /contract_address|program_id|channel_index_from_block/
+    );
   });
 
-  it('presets Base Sepolia through the registry, against the 6dp mock USDC', () => {
+  it('presets Base Sepolia against the 6dp mock USDC', () => {
     assert.match(envExample, /^SETTLEMENT_EVM_RPC_URL=https:\/\/base-sepolia-rpc\.publicnode\.com$/m);
-    assert.match(envExample, /^SETTLEMENT_EVM_REGISTRY=0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5$/m);
     assert.match(envExample, /^SETTLEMENT_EVM_TOKEN=0x0C996d7c934c79a6255254875607Fe69df25C0E1$/m);
+    // The x402 contract is a fixed binary constant now (ADR 0075): no
+    // registry/TokenNetwork address is preset any more.
+    assert.doesNotMatch(envExample, /SETTLEMENT_EVM_REGISTRY/);
   });
 
-  it('backfills the channel index from the live TokenNetwork deploy block, not genesis', () => {
-    // TOON_Network#182: [settlement.evm] channel_index_from_block (connector
-    // issue #661) defaults to 0, and SETTLEMENT_EVM_RPC_URL's preset prunes
-    // history well short of genesis, so a cold connector never warms its
-    // local channel index up and pays a direct chain read for every channel
-    // lookup instead. 47285026 is the deploy block of the TokenNetwork
-    // SETTLEMENT_EVM_REGISTRY/SETTLEMENT_EVM_TOKEN above resolve to (connector
-    // packages/contracts/deployments/base-sepolia.md, the 2026-09-25 USDC
-    // cutover's createTokenNetwork transaction).
-    assert.match(envExample, /^SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK=47285026$/m);
+  it('presets the EIP-712 domain devnet USDC signs deposits under', () => {
+    // Required now that every channel is an x402 channel (ADR 0075): a client
+    // signs its deposit under this name/version, and a wrong value builds a
+    // signature that never verifies.
+    assert.match(envExample, /^SETTLEMENT_EVM_EIP712_NAME=USDC$/m);
+    assert.match(envExample, /^SETTLEMENT_EVM_EIP712_VERSION=2$/m);
   });
 
-  it('presets Solana devnet against the deployed payment-channel program', () => {
+  it('presets Solana devnet against the mock USDC mint', () => {
     assert.match(envExample, /^SETTLEMENT_SOLANA_RPC_URL=https:\/\/api\.devnet\.solana\.com$/m);
-    assert.match(envExample, /^SETTLEMENT_SOLANA_PROGRAM_ID=2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip$/m);
     assert.match(envExample, /^SETTLEMENT_SOLANA_TOKEN=34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU$/m);
+    // The payment-channels program is a fixed binary constant now (ADR
+    // 0075): no program id is preset any more.
+    assert.doesNotMatch(envExample, /SETTLEMENT_SOLANA_PROGRAM_ID/);
+  });
+
+  it('presets the minimum deposit this node will sponsor on Solana', () => {
+    // Required now that every channel is an x402 channel (ADR 0075): bounds
+    // how much SOL a stranger can make this node spend opening a channel.
+    assert.match(envExample, /^SETTLEMENT_SOLANA_MIN_SPONSORED_DEPOSIT=1000000$/m);
   });
 
   it('presets 6 decimals on both legs, which the connector checks against the chain', () => {

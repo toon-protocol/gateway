@@ -538,11 +538,17 @@ before the build that requires it.** Here the pin and the config it was
 validated against are the same commit and the box takes both with one
 fast-forward, so a build can never reach this box ahead of the config it needs.
 
-The current pin is `rust-2026.09.27.2` (= `rust-sha-bdec037`), the build the
-rest of the devnet fleet (relay, store, gas-station) runs. Everything the
-09.27 releases add to the config schema — `rpc_via_socks_proxy` and the x402
-batch-settlement tables — is optional and absent here, so this bundle's
-`connector.toml` loads unchanged.
+The current pin is `rust-2026.09.28.1` (= `rust-sha-81c220d`), the first
+x402-only build (connector ADR 0075) and the one the rest of the devnet fleet
+(relay, store, gas-station) runs. It is a breaking bump: TOON's own
+`TokenNetwork`/payment-channel channels are gone, the x402 contract/program
+are fixed constants of the binary rather than config, and `asset_eip712_name`
+/ `asset_eip712_version` (EVM) and `min_sponsored_deposit` (Solana) are now
+required wherever their settlement table exists — this bundle's template,
+`.env.example` and `deploy/testdata/` were updated in the same commit that
+moved this pin. See the connector repo's
+[`docs/releases/x402-only.md`](https://github.com/toon-protocol/connector/blob/main/docs/releases/x402-only.md)
+for the full before/after.
 
 ## Privacy and exposure invariants
 
