@@ -130,16 +130,25 @@ export async function startStubConnector({
         btpEndpoint: `ws://${req.headers.host}/ilp/btp`,
         peerCarriages: [],
         edgeIdentity: { keyId: 'stub', publicKey: hex(giftWrapPublicKey(identitySecret)) },
-        settlements: [
+        // What an x402-only connector publishes (connector ADR 0075, release
+        // 2026.09.28.1 on): `batchSettlements` and `voucherSigners`, and no
+        // `settlements` at all. Copied from the devnet relay's own `GET /ilp`,
+        // because a client that could not read this refused every member
+        // before it sent a `status` (gateway#28).
+        batchSettlements: [
           {
-            chain: 'evm:84532',
-            settlementAddress: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
-            tokenNetworkRegistry: '0x8263BdD4eB4862395Cb4ef5dA5d637F4b047Eea1',
-            tokenNetwork: '0xa79C3b1dbcEA00a6d84735a134395D8eF6D6a478',
-            tokenAddress: '0x0C996d7c934c79a6255254875607Fe69df25C0E1',
-            decimals: 6,
+            network: 'eip155:84532',
+            asset: '0x0c996d7c934c79a6255254875607fe69df25c0e1',
+            payTo: '0x3f43d923a611bcb2d0bfb5d6ee2c3ac3efeaf308',
+            receiverAuthorizer: '0x3f43d923a611bcb2d0bfb5d6ee2c3ac3efeaf308',
+            withdrawDelay: 86400,
+            name: 'USDC',
+            version: '2',
+            assetTransferMethod: 'eip3009',
+            facilitator: 'https://onboard.devnet.toonprotocol.dev',
           },
         ],
+        voucherSigners: [{ network: 'eip155:84532', signer: '0x3f43d923a611bcb2d0bfb5d6ee2c3ac3efeaf308' }],
         routes: [{ prefix: `${ilpAddress}.status`, price: '0' }],
         supportedVersions: [1],
         defaultVersion: 1,

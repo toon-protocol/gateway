@@ -152,10 +152,12 @@ export function createConnectors({
       evmPrivateKey: identity.evm.privateKey,
       solanaSecretKey: identity.solana.secretKey,
       // `status` is free, so there is nothing to pay and nothing to open a
-      // channel for. Off, rather than merely unused: a bug that addressed a
-      // paid route here fails loudly instead of quietly buying something.
+      // channel for: a free route carries no voucher. Off, rather than merely
+      // unused: a bug that addressed a paid route here fails loudly
+      // (`ChannelNotOpenError`) instead of quietly buying something. There is
+      // no `deposit` to zero beside it — the client refuses a deposit of 0,
+      // and with no channel ever opened no deposit is ever made.
       autoOpenChannel: false,
-      deposit: 0n,
       // One-shot and stateless, which is what a `status` is.
       transport: /** @type {'http'} */ ('http'),
       timeoutMs,
