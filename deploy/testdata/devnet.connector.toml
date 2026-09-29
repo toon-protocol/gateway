@@ -112,9 +112,8 @@ asset_eip712_version   = "2"
 # eip3009 for a token with ERC-3009, permit2 for any other ERC-20.
 asset_transfer_method  = "eip3009"
 # The x402 facilitator this operator names for deposits into its channels, and
-# pays the gas of (connector ADR 0076), published as `facilitator`. render.sh
-# drops this line when .env leaves it empty: an operator who runs none names
-# none, and a payer holding its own ETH deposits directly.
+# pays the gas of (connector ADR 0076), published as `facilitator`. An operator
+# who runs none names none, and a payer holding its own ETH deposits directly.
 facilitator_url        = "https://onboard.devnet.toonprotocol.dev"
 
 [settlement.evm.key]

@@ -44,9 +44,6 @@ set -a; . ./.env; set +a
 : "${SETTLEMENT_EVM_EIP712_NAME:?set SETTLEMENT_EVM_EIP712_NAME in .env (.env.example has the devnet preset)}"
 : "${SETTLEMENT_EVM_EIP712_VERSION:?set SETTLEMENT_EVM_EIP712_VERSION in .env (.env.example has the devnet preset)}"
 : "${SETTLEMENT_EVM_ASSET_TRANSFER_METHOD:?set SETTLEMENT_EVM_ASSET_TRANSFER_METHOD in .env (.env.example has the devnet preset)}"
-# The facilitator is optional: an operator who runs none leaves it empty, and
-# the facilitator_url line is dropped from connector.toml below.
-: "${SETTLEMENT_EVM_FACILITATOR_URL:=}"
 : "${SETTLEMENT_SOLANA_RPC_URL:?set SETTLEMENT_SOLANA_RPC_URL in .env (.env.example has the devnet preset)}"
 : "${SETTLEMENT_SOLANA_TOKEN:?set SETTLEMENT_SOLANA_TOKEN in .env (.env.example has the devnet preset)}"
 : "${SETTLEMENT_SOLANA_DECIMALS:?set SETTLEMENT_SOLANA_DECIMALS in .env (.env.example has the devnet preset)}"
@@ -158,6 +155,9 @@ RE_HOOK='^[a-z0-9][a-z0-9_-]*$'
 for name in SETTLEMENT_EVM_RPC_URL SETTLEMENT_SOLANA_RPC_URL; do
   [[ "${!name}" =~ $RE_URL ]] || refuse_shape "$name" "${!name}" "an http(s) URL"
 done
+# The facilitator is optional: an operator who runs none leaves it empty, and
+# the facilitator_url line is dropped from connector.toml below.
+SETTLEMENT_EVM_FACILITATOR_URL="${SETTLEMENT_EVM_FACILITATOR_URL:-}"
 if [ -n "$SETTLEMENT_EVM_FACILITATOR_URL" ]; then
   [[ "$SETTLEMENT_EVM_FACILITATOR_URL" =~ $RE_URL ]] \
     || refuse_shape SETTLEMENT_EVM_FACILITATOR_URL "$SETTLEMENT_EVM_FACILITATOR_URL" "an http(s) URL"
