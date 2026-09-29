@@ -39,14 +39,14 @@ set -a; . ./.env; set +a
 # the devnet's mock USDC. .env.example carries the devnet's as a preset.
 : "${ILP_ADDRESS:?set ILP_ADDRESS in .env (the ILP address of this node; the handover route hangs off it)}"
 : "${SETTLEMENT_EVM_RPC_URL:?set SETTLEMENT_EVM_RPC_URL in .env (.env.example has the devnet preset)}"
-: "${SETTLEMENT_EVM_REGISTRY:?set SETTLEMENT_EVM_REGISTRY in .env (.env.example has the devnet preset)}"
 : "${SETTLEMENT_EVM_TOKEN:?set SETTLEMENT_EVM_TOKEN in .env (.env.example has the devnet preset)}"
 : "${SETTLEMENT_EVM_DECIMALS:?set SETTLEMENT_EVM_DECIMALS in .env (.env.example has the devnet preset)}"
-: "${SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK:?set SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK in .env (.env.example has the devnet preset)}"
+: "${SETTLEMENT_EVM_EIP712_NAME:?set SETTLEMENT_EVM_EIP712_NAME in .env (.env.example has the devnet preset)}"
+: "${SETTLEMENT_EVM_EIP712_VERSION:?set SETTLEMENT_EVM_EIP712_VERSION in .env (.env.example has the devnet preset)}"
 : "${SETTLEMENT_SOLANA_RPC_URL:?set SETTLEMENT_SOLANA_RPC_URL in .env (.env.example has the devnet preset)}"
-: "${SETTLEMENT_SOLANA_PROGRAM_ID:?set SETTLEMENT_SOLANA_PROGRAM_ID in .env (.env.example has the devnet preset)}"
 : "${SETTLEMENT_SOLANA_TOKEN:?set SETTLEMENT_SOLANA_TOKEN in .env (.env.example has the devnet preset)}"
 : "${SETTLEMENT_SOLANA_DECIMALS:?set SETTLEMENT_SOLANA_DECIMALS in .env (.env.example has the devnet preset)}"
+: "${SETTLEMENT_SOLANA_MIN_SPONSORED_DEPOSIT:?set SETTLEMENT_SOLANA_MIN_SPONSORED_DEPOSIT in .env (.env.example has the devnet preset)}"
 
 # ── Fronted by this box's own nginx, or by the devnet host's shared edge ────
 # SHARED_EDGE=1 (toon-protocol/gateway#18, infra#24, infra ADR 0001) means this
@@ -146,26 +146,31 @@ RE_URL='^https?://[^[:space:]"]+$'
 RE_EVM='^0x[0-9a-fA-F]{40}$'
 RE_B58='^[1-9A-HJ-NP-Za-km-z]{32,44}$'
 RE_DEC='^[0-9]{1,2}$'
+RE_INT='^[0-9]+$'
+RE_NOQUOTE='^[^"]+$'
 RE_HOOK='^[a-z0-9][a-z0-9_-]*$'
 [[ "$ILP_ADDRESS" =~ $RE_ILP ]] \
   || refuse_shape ILP_ADDRESS "$ILP_ADDRESS" "an ILP address (e.g. g.<your-name>.workload-gateway)"
 for name in SETTLEMENT_EVM_RPC_URL SETTLEMENT_SOLANA_RPC_URL; do
   [[ "${!name}" =~ $RE_URL ]] || refuse_shape "$name" "${!name}" "an http(s) URL"
 done
-for name in SETTLEMENT_EVM_REGISTRY SETTLEMENT_EVM_TOKEN; do
-  [[ "${!name}" =~ $RE_EVM ]] || refuse_shape "$name" "${!name}" "a 0x-prefixed 20-byte EVM address"
-done
-for name in SETTLEMENT_SOLANA_PROGRAM_ID SETTLEMENT_SOLANA_TOKEN; do
-  [[ "${!name}" =~ $RE_B58 ]] || refuse_shape "$name" "${!name}" "a base58 Solana address"
-done
+[[ "$SETTLEMENT_EVM_TOKEN" =~ $RE_EVM ]] \
+  || refuse_shape SETTLEMENT_EVM_TOKEN "$SETTLEMENT_EVM_TOKEN" "a 0x-prefixed 20-byte EVM address"
+[[ "$SETTLEMENT_SOLANA_TOKEN" =~ $RE_B58 ]] \
+  || refuse_shape SETTLEMENT_SOLANA_TOKEN "$SETTLEMENT_SOLANA_TOKEN" "a base58 Solana address"
 for name in SETTLEMENT_EVM_DECIMALS SETTLEMENT_SOLANA_DECIMALS; do
   [[ "${!name}" =~ $RE_DEC ]] || refuse_shape "$name" "${!name}" "a whole number of decimals"
+done
+[[ "$SETTLEMENT_SOLANA_MIN_SPONSORED_DEPOSIT" =~ $RE_INT ]] \
+  || refuse_shape SETTLEMENT_SOLANA_MIN_SPONSORED_DEPOSIT "$SETTLEMENT_SOLANA_MIN_SPONSORED_DEPOSIT" "a whole number of the mint's base units"
+for name in SETTLEMENT_EVM_EIP712_NAME SETTLEMENT_EVM_EIP712_VERSION; do
+  [[ "${!name}" =~ $RE_NOQUOTE ]] || refuse_shape "$name" "${!name}" "a value with no \" character (it is quoted as-is in connector.toml)"
 done
 
 # `#:` lines are notes on the template itself and are dropped here, before
 # envsubst, so a note may mention a ${VARIABLE} without it being substituted.
 sed '/^#:/d' connector.toml.template \
-  | envsubst '${EDGE_HOST} ${GATEWAY_DOMAIN} ${ILP_ADDRESS} ${SETTLEMENT_EVM_RPC_URL} ${SETTLEMENT_EVM_REGISTRY} ${SETTLEMENT_EVM_TOKEN} ${SETTLEMENT_EVM_DECIMALS} ${SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK} ${SETTLEMENT_SOLANA_RPC_URL} ${SETTLEMENT_SOLANA_PROGRAM_ID} ${SETTLEMENT_SOLANA_TOKEN} ${SETTLEMENT_SOLANA_DECIMALS}' \
+  | envsubst '${EDGE_HOST} ${GATEWAY_DOMAIN} ${ILP_ADDRESS} ${SETTLEMENT_EVM_RPC_URL} ${SETTLEMENT_EVM_TOKEN} ${SETTLEMENT_EVM_DECIMALS} ${SETTLEMENT_EVM_EIP712_NAME} ${SETTLEMENT_EVM_EIP712_VERSION} ${SETTLEMENT_SOLANA_RPC_URL} ${SETTLEMENT_SOLANA_TOKEN} ${SETTLEMENT_SOLANA_DECIMALS} ${SETTLEMENT_SOLANA_MIN_SPONSORED_DEPOSIT}' \
   > connector.toml
 
 # ── The DNS-01 hook's environment ────────────────────────────────────────────
