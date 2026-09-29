@@ -43,6 +43,7 @@ set -a; . ./.env; set +a
 : "${SETTLEMENT_EVM_DECIMALS:?set SETTLEMENT_EVM_DECIMALS in .env (.env.example has the devnet preset)}"
 : "${SETTLEMENT_EVM_EIP712_NAME:?set SETTLEMENT_EVM_EIP712_NAME in .env (.env.example has the devnet preset)}"
 : "${SETTLEMENT_EVM_EIP712_VERSION:?set SETTLEMENT_EVM_EIP712_VERSION in .env (.env.example has the devnet preset)}"
+: "${SETTLEMENT_EVM_ASSET_TRANSFER_METHOD:?set SETTLEMENT_EVM_ASSET_TRANSFER_METHOD in .env (.env.example has the devnet preset)}"
 : "${SETTLEMENT_SOLANA_RPC_URL:?set SETTLEMENT_SOLANA_RPC_URL in .env (.env.example has the devnet preset)}"
 : "${SETTLEMENT_SOLANA_TOKEN:?set SETTLEMENT_SOLANA_TOKEN in .env (.env.example has the devnet preset)}"
 : "${SETTLEMENT_SOLANA_DECIMALS:?set SETTLEMENT_SOLANA_DECIMALS in .env (.env.example has the devnet preset)}"
@@ -154,6 +155,17 @@ RE_HOOK='^[a-z0-9][a-z0-9_-]*$'
 for name in SETTLEMENT_EVM_RPC_URL SETTLEMENT_SOLANA_RPC_URL; do
   [[ "${!name}" =~ $RE_URL ]] || refuse_shape "$name" "${!name}" "an http(s) URL"
 done
+# The facilitator is optional: an operator who runs none leaves it empty, and
+# the facilitator_url line is dropped from connector.toml below.
+SETTLEMENT_EVM_FACILITATOR_URL="${SETTLEMENT_EVM_FACILITATOR_URL:-}"
+if [ -n "$SETTLEMENT_EVM_FACILITATOR_URL" ]; then
+  [[ "$SETTLEMENT_EVM_FACILITATOR_URL" =~ $RE_URL ]] \
+    || refuse_shape SETTLEMENT_EVM_FACILITATOR_URL "$SETTLEMENT_EVM_FACILITATOR_URL" "an http(s) URL"
+fi
+case "$SETTLEMENT_EVM_ASSET_TRANSFER_METHOD" in
+  eip3009 | permit2) ;;
+  *) refuse_shape SETTLEMENT_EVM_ASSET_TRANSFER_METHOD "$SETTLEMENT_EVM_ASSET_TRANSFER_METHOD" "eip3009 or permit2" ;;
+esac
 [[ "$SETTLEMENT_EVM_TOKEN" =~ $RE_EVM ]] \
   || refuse_shape SETTLEMENT_EVM_TOKEN "$SETTLEMENT_EVM_TOKEN" "a 0x-prefixed 20-byte EVM address"
 [[ "$SETTLEMENT_SOLANA_TOKEN" =~ $RE_B58 ]] \
@@ -169,8 +181,12 @@ done
 
 # `#:` lines are notes on the template itself and are dropped here, before
 # envsubst, so a note may mention a ${VARIABLE} without it being substituted.
-sed '/^#:/d' connector.toml.template \
-  | envsubst '${EDGE_HOST} ${GATEWAY_DOMAIN} ${ILP_ADDRESS} ${SETTLEMENT_EVM_RPC_URL} ${SETTLEMENT_EVM_TOKEN} ${SETTLEMENT_EVM_DECIMALS} ${SETTLEMENT_EVM_EIP712_NAME} ${SETTLEMENT_EVM_EIP712_VERSION} ${SETTLEMENT_SOLANA_RPC_URL} ${SETTLEMENT_SOLANA_TOKEN} ${SETTLEMENT_SOLANA_DECIMALS} ${SETTLEMENT_SOLANA_MIN_SPONSORED_DEPOSIT}' \
+# With no facilitator in .env, its line is dropped too, before envsubst: the
+# connector refuses a facilitator_url that is not a URL, and "" is not one.
+no_facilitator=''
+[ -z "$SETTLEMENT_EVM_FACILITATOR_URL" ] && no_facilitator='/^facilitator_url[[:space:]]*=/d'
+sed -e '/^#:/d' ${no_facilitator:+-e "$no_facilitator"} connector.toml.template \
+  | envsubst '${EDGE_HOST} ${GATEWAY_DOMAIN} ${ILP_ADDRESS} ${SETTLEMENT_EVM_RPC_URL} ${SETTLEMENT_EVM_TOKEN} ${SETTLEMENT_EVM_DECIMALS} ${SETTLEMENT_EVM_EIP712_NAME} ${SETTLEMENT_EVM_EIP712_VERSION} ${SETTLEMENT_EVM_ASSET_TRANSFER_METHOD} ${SETTLEMENT_EVM_FACILITATOR_URL} ${SETTLEMENT_SOLANA_RPC_URL} ${SETTLEMENT_SOLANA_TOKEN} ${SETTLEMENT_SOLANA_DECIMALS} ${SETTLEMENT_SOLANA_MIN_SPONSORED_DEPOSIT}' \
   > connector.toml
 
 # ── The DNS-01 hook's environment ────────────────────────────────────────────

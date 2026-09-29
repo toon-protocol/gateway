@@ -24,7 +24,7 @@ const read = (name) => readFileSync(join(HERE, name), 'utf8');
 
 const PLACEHOLDER_PIN = 'ghcr.io/toon-protocol/gateway:sha-0000000';
 const REAL_PIN = 'ghcr.io/toon-protocol/gateway:sha-f278cd6';
-const CONNECTOR_PIN = 'ghcr.io/toon-protocol/connector:rust-2026.09.28.1';
+const CONNECTOR_PIN = 'ghcr.io/toon-protocol/connector:rust-2026.09.29.1';
 
 // A `docker` that answers the three things pull-images.sh asks of it and
 // records every call, one per line, as its argv joined by spaces.
