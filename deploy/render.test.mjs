@@ -178,6 +178,27 @@ describe('an operator who is not us', () => {
   });
 });
 
+// ── The facilitator is the operator's own, and optional ─────────────────────
+// A facilitator is a service this operator runs and pays the gas of (connector
+// ADR 0076); one who runs none leaves the line empty, and connector.toml then
+// names none rather than a facilitator_url = "" the connector refuses at boot.
+describe('the facilitator (infra#44)', () => {
+  it('is named in connector.toml when .env names one', () => {
+    const op = render({ ...OUTSIDE_OPERATOR, SETTLEMENT_EVM_FACILITATOR_URL: 'https://onboard.acme.example' });
+    assert.equal(op.status, 0, op.stderr);
+    assert.match(op.file('connector.toml'), /^facilitator_url\s*=\s*"https:\/\/onboard\.acme\.example"$/m);
+  });
+
+  it('is left out of connector.toml when .env leaves it empty', () => {
+    const op = render({ ...OUTSIDE_OPERATOR, SETTLEMENT_EVM_FACILITATOR_URL: '' });
+    assert.equal(op.status, 0, op.stderr);
+    const toml = op.file('connector.toml');
+    assert.doesNotMatch(toml, /^facilitator_url/m);
+    // The deposit method is still stated: it is a fact about the token.
+    assert.match(toml, /^asset_transfer_method\s*=\s*"eip3009"$/m);
+  });
+});
+
 describe('what render.sh refuses', () => {
   const refused = (overrides, pattern) => {
     const result = render({ ...OUTSIDE_OPERATOR, ...overrides });
@@ -199,6 +220,24 @@ describe('what render.sh refuses', () => {
 
   it('a settlement value that is not the shape it lands in', () => {
     refused({ SETTLEMENT_EVM_TOKEN: '0x1234' }, /SETTLEMENT_EVM_TOKEN=0x1234 in \.env is not a 0x-prefixed 20-byte EVM address/);
+  });
+
+  it('a deposit method the connector does not know', () => {
+    refused(
+      { SETTLEMENT_EVM_ASSET_TRANSFER_METHOD: 'erc20' },
+      /SETTLEMENT_EVM_ASSET_TRANSFER_METHOD=erc20 in \.env is not eip3009 or permit2/
+    );
+  });
+
+  it('no deposit method at all', () => {
+    refused({ SETTLEMENT_EVM_ASSET_TRANSFER_METHOD: '' }, /set SETTLEMENT_EVM_ASSET_TRANSFER_METHOD in \.env/);
+  });
+
+  it('a facilitator that is not an http(s) URL', () => {
+    refused(
+      { SETTLEMENT_EVM_FACILITATOR_URL: 'onboard.acme.example' },
+      /SETTLEMENT_EVM_FACILITATOR_URL=onboard\.acme\.example in \.env is not an http\(s\) URL/
+    );
   });
 
   it('a DNS provider with no hook', () => {

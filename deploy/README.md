@@ -538,9 +538,19 @@ before the build that requires it.** Here the pin and the config it was
 validated against are the same commit and the box takes both with one
 fast-forward, so a build can never reach this box ahead of the config it needs.
 
-The current pin is `rust-2026.09.28.1` (= `rust-sha-81c220d`), the first
-x402-only build (connector ADR 0075) and the one the rest of the devnet fleet
-(relay, store, gas-station) runs. It is a breaking bump: TOON's own
+The current pin is `rust-2026.09.29.1`, the build the rest of the devnet fleet
+(relay, store, gas-station) runs. Over `rust-2026.09.28.1` it publishes the EVM
+deposit method and this node's facilitator in its batch-settlement terms
+(connector#1419), and checks `asset_transfer_method` and the asset's EIP-712
+domain against the token at boot (connector#1425). Both come from `.env`:
+`SETTLEMENT_EVM_ASSET_TRANSFER_METHOD` (required) and
+`SETTLEMENT_EVM_FACILITATOR_URL` (empty names none). The devnet box names the
+devnet's Onboarder, as every devnet node does (infra#44): the handover route
+is free, but a client can still open a channel here, and it should be able to
+do that without holding ETH.
+
+`rust-2026.09.28.1` (= `rust-sha-81c220d`) was the first x402-only build
+(connector ADR 0075). It was a breaking bump: TOON's own
 `TokenNetwork`/payment-channel channels are gone, the x402 contract/program
 are fixed constants of the binary rather than config, and `asset_eip712_name`
 / `asset_eip712_version` (EVM) and `min_sponsored_deposit` (Solana) are now

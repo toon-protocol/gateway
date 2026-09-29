@@ -199,7 +199,7 @@ function autoApply(boxDir, extraEnv = {}) {
     STUB_LOG: log,
     STUB_SERVICES: 'gateway connector nginx certbot',
     STUB_IMAGE_gateway: 'ghcr.io/toon-protocol/gateway:sha-0000000',
-    STUB_IMAGE_connector: 'ghcr.io/toon-protocol/connector:rust-2026.09.28.1',
+    STUB_IMAGE_connector: 'ghcr.io/toon-protocol/connector:rust-2026.09.29.1',
     // Never the real, root-owned /var/lock/toon-auto-apply-gateway.lock --
     // this is the one knob auto-apply.sh exposes purely for tests.
     TOON_AUTOAPPLY_LOCK: join(boxDir, '.autoapply.lock'),

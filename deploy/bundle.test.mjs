@@ -65,7 +65,7 @@ const ILP_ADDRESS = '${ILP_ADDRESS}';
 const HANDOVER_ROUTE = '${ILP_ADDRESS}.handover';
 const HANDOVER_PORT = '8081';
 const HANDOVER_HANDLER = 'http://gateway:8081/handover';
-const CONNECTOR_PIN = 'ghcr.io/toon-protocol/connector:rust-2026.09.28.1';
+const CONNECTOR_PIN = 'ghcr.io/toon-protocol/connector:rust-2026.09.29.1';
 // An immutable build: a dated release alias or an exact commit. Never
 // `rust-main`, and never the retired `rust-release` pointer.
 const IMMUTABLE_PIN = /:(rust-sha-[0-9a-f]{7,40}|rust-\d{4}\.\d{2}\.\d{2}\.\d+)$/;
@@ -132,6 +132,8 @@ describe('settlement', () => {
       ['token_address', 'SETTLEMENT_EVM_TOKEN'],
       ['asset_eip712_name', 'SETTLEMENT_EVM_EIP712_NAME'],
       ['asset_eip712_version', 'SETTLEMENT_EVM_EIP712_VERSION'],
+      ['asset_transfer_method', 'SETTLEMENT_EVM_ASSET_TRANSFER_METHOD'],
+      ['facilitator_url', 'SETTLEMENT_EVM_FACILITATOR_URL'],
       ['rpc_url', 'SETTLEMENT_SOLANA_RPC_URL'],
       ['token_address', 'SETTLEMENT_SOLANA_TOKEN'],
     ]) {
@@ -167,6 +169,14 @@ describe('settlement', () => {
     // signature that never verifies.
     assert.match(envExample, /^SETTLEMENT_EVM_EIP712_NAME=USDC$/m);
     assert.match(envExample, /^SETTLEMENT_EVM_EIP712_VERSION=2$/m);
+  });
+
+  it('presets how a deposit moves devnet USDC, and the devnet Onboarder as its facilitator', () => {
+    // Published in the EVM batchSettlements entry as assetTransferMethod and
+    // facilitator (connector#1419), as relay, store and gas-station do
+    // (infra#44). Devnet USDC is Circle's FiatToken, which has ERC-3009.
+    assert.match(envExample, /^SETTLEMENT_EVM_ASSET_TRANSFER_METHOD=eip3009$/m);
+    assert.match(envExample, /^SETTLEMENT_EVM_FACILITATOR_URL=https:\/\/onboard\.devnet\.toonprotocol\.dev$/m);
   });
 
   it('presets Solana devnet against the mock USDC mint', () => {
