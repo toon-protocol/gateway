@@ -455,9 +455,9 @@ addressable.
 for is sold, and this process buys nothing either: it holds no payment
 channel, no mnemonic and no lease, and it never calls a paid route. The
 connector still carries two settlement keys, for the tenant's sake: a
-connector client opens its channel against the settlement key the payee's
-`GET /ilp` reports, so a node with no settlement table has nothing to open one
-against. The Solana key needs a little SOL to boot
+connector client opens its channel against the `batchSettlements` terms the
+payee's `GET /ilp` publishes, so a node that publishes none has nothing to open
+one against. The Solana key needs a little SOL to boot
 ([Funding](deploy/README.md#funding)).
 
 nginx fronts the connector at `EDGE_HOST` and the gateway at every name under

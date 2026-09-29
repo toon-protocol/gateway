@@ -145,7 +145,9 @@ export async function startStubConnector({
             name: 'USDC',
             version: '2',
             assetTransferMethod: 'eip3009',
-            facilitator: 'https://onboard.devnet.toonprotocol.dev',
+            // The relay names the devnet Onboarder here; a free `status` never
+            // dials a facilitator, so the stub names nothing reachable.
+            facilitator: 'https://facilitator.fixture.example',
           },
         ],
         voucherSigners: [{ network: 'eip155:84532', signer: '0x3f43d923a611bcb2d0bfb5d6ee2c3ac3efeaf308' }],
