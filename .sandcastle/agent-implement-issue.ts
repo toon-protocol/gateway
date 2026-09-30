@@ -21,7 +21,7 @@
 //   CLAUDE_CODE_OAUTH_TOKEN   authenticates Claude Code in the sandbox
 //   GH_TOKEN                  App installation token (contents, PRs and issues: write)
 //   APP_ID, APP_PRIVATE_KEY   optional. Used to mint a fresh token before each push,
-//                             because installation tokens expire after an hour (#462).
+//                             because installation tokens expire after an hour (connector#462).
 //                             Host only: they are never forwarded into the sandbox.
 //
 // Usage:
@@ -207,7 +207,14 @@ async function main() {
       maxIterations: 1,
       agent: sandcastle.claudeCode('claude-opus-5-5'),
       promptFile: './.sandcastle/review-prompt.md',
-      promptArgs: { ISSUE_URL: issue.url, ISSUE_NUMBER: issueNumber, BRANCH: branch },
+      // BASE_BRANCH, not the built-in TARGET_BRANCH: inside createSandbox() sandcastle sets
+      // that one to the sandbox's own branch, which would review the branch against itself.
+      promptArgs: {
+        ISSUE_URL: issue.url,
+        ISSUE_NUMBER: issueNumber,
+        BRANCH: branch,
+        BASE_BRANCH: BASE,
+      },
     });
     const summary = reviewSummary(review.stdout);
 

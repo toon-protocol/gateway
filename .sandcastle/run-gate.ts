@@ -31,7 +31,7 @@ export interface GateResult {
   readonly failure: GateFailure | null;
 }
 
-/** Keep fed-back output useful but bounded — a full cargo build log is megabytes. */
+/** Keep fed-back output useful but bounded — a full test log can be megabytes. */
 const MAX_OUTPUT_CHARS = 12_000;
 
 /** ci.yml's `test` job, step for step. */
