@@ -15,7 +15,7 @@ npm run typecheck       # tsc over the JSDoc in src/ and tests/
 
 That is the `test` job in `.github/workflows/ci.yml`, in that order, and it is the gate the AFK
 runner (`.sandcastle/`, `agent-implement.yml`) runs before it opens a PR. The `docker-build` job
-builds the root `Dockerfile`, the published image; the sandbox image is `.sandcastle/Dockerfile`
-and is a different thing.
+builds the root `Dockerfile`, the published image; the sandbox image is the shared
+`ghcr.io/toon-protocol/sandcastle-agent` (built from connector) and is a different thing.
 
 Never weaken, skip or ignore a test, and never loosen a type-check or lint setting, to get green.
