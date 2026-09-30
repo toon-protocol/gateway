@@ -1,0 +1,51 @@
+name: Agent image
+
+# Minimal build-only check for the sandcastle agent container image.
+# Proves `.sandcastle/Dockerfile` (node:22-bookworm + gh + Claude Code CLI + the
+# mattpocock-skills plugin) builds and has what the runner needs. This is not the
+# runner itself (that is agent-implement.yml), and it is not the published
+# gateway image (that is the root Dockerfile, built by publish-gateway-image.yml).
+# Nothing here pushes: the prebuilt image is pushed by hand, see agent-implement.yml.
+
+on:
+  pull_request:
+    paths:
+      - '.sandcastle/**'
+      - '.github/workflows/agent-image.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-image:
+    name: Build sandcastle agent image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.12.0'
+
+      # Docker is preinstalled on ubuntu-latest GitHub-hosted runners.
+      # `sandcastle docker build-image` builds .sandcastle/Dockerfile, defaulting
+      # the AGENT_UID/AGENT_GID build args to the runner's uid/gid, and tags it
+      # `sandcastle:<checkout directory>`, which is `sandcastle:gateway` here.
+      - name: Build agent image
+        run: npx --yes @ai-hero/sandcastle@0.12.0 docker build-image
+
+      - name: Verify toolchain inside image
+        run: |
+          docker run --rm --entrypoint bash sandcastle:gateway -lc '
+            set -e
+            node --version
+            npm --version
+            gh --version | head -1
+            python3 --version
+            g++ --version | head -1
+            test "$(whoami)" = "agent"
+            test -x /home/agent/.local/bin/claude
+            # The runner starts every session with a mattpocock-skills slash command.
+            claude plugin list | grep -q mattpocock-skills
+          '
