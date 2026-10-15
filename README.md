@@ -1,6 +1,6 @@
 # The Workload Gateway
 
-A stable HTTPS name for a TOON Network workload, keyed by its **workload id**.
+A stable HTTPS name for a TOON Compute workload, keyed by its **workload id**.
 
 A workload is reachable today only at whichever provider is running it, on a
 host and a port that provider chose — and a [Hidden Provider][hidden] has no

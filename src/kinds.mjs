@@ -11,5 +11,5 @@ export const K_PROFILE = 10432;
 export const K_LIVENESS = 10433;
 export const K_TAKEOVER = 30433;
 
-/** The label every published TOON Network event carries (spec §4). */
+/** The label every published TOON Compute event carries (spec §4). */
 export const LABEL = 'toon.network';
