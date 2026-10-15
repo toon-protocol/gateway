@@ -111,7 +111,7 @@ export function renderUnavailable(why, accept = '*/*') {
         `<p><code>${escapeHtml(why.reason)}</code></p>` +
         `<p>${escapeHtml(why.message)}</p>` +
         '<p><small>This is the Workload Gateway answering, not the workload ' +
-        '(TOON Network spec §12).</small></p></body></html>\n',
+        '(TOON Compute spec §12).</small></p></body></html>\n',
     };
   }
   return {

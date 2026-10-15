@@ -2,7 +2,7 @@
   "name": "toon-workload-gateway",
   "version": "0.1.0",
   "private": true,
-  "description": "A Workload Gateway: fronts a TOON Network workload at a stable hostname, keyed by its workload id",
+  "description": "A Workload Gateway: fronts a TOON Compute workload at a stable hostname, keyed by its workload id",
   "license": "Apache-2.0",
   "type": "module",
   "main": "src/main.mjs",

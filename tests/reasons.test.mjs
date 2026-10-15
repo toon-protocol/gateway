@@ -27,7 +27,7 @@ describe('unavailable', () => {
 });
 
 describe('renderUnavailable', () => {
-  it('answers JSON in the shape every other TOON Network error uses', () => {
+  it('answers JSON in the shape every other TOON Compute error uses', () => {
     const rendered = renderUnavailable(unavailable('no_grant', { host: 'abc.gw.example' }), '*/*');
     assert.equal(rendered.status, 503);
     assert.match(rendered.contentType, /^application\/json/);

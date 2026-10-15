@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-The Workload Gateway: a stable HTTPS name for a TOON Network workload, keyed by its workload id.
+The Workload Gateway: a stable HTTPS name for a TOON Compute workload, keyed by its workload id.
 `README.md` says what it is and how to run one; `deploy/README.md` covers the box bundle. Issue
 tracker, triage labels and domain docs are in `docs/agents/`.
 
