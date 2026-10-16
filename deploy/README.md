@@ -22,7 +22,7 @@ One host, four containers, one wildcard certificate.
 | File | What it is |
 |---|---|
 | `docker-compose.yml` | The four services. The connector's pin lives here and nowhere else. |
-| `docker-compose.shared-edge.yml` | Overlay, off by default (`COMPOSE_FILE` in `.env`): disables `nginx`/`certbot` and joins `gateway`/`connector` to this node's own `edge-gateway` network. § "Running behind the shared edge". |
+| `docker-compose.shared-edge.yml` | Overlay, off by default (`COMPOSE_FILE` in `.env`): disables `nginx`/`certbot`/`connector` (the devnet runs the relay's one connector) and joins `gateway` to this node's own `edge-gateway` network. § "Running behind the shared edge". |
 | `connector.toml.template` | The connector's whole configuration. Rendered; names key paths, holds no secret. |
 | `nginx/node.conf.template` | The two server blocks. Rendered. |
 | `certbot/<provider>.py` | The DNS-01 auth and cleanup hooks, one file per DNS provider: `porkbun.py`, `cloudflare.py`. No plugin, no image of our own. |
@@ -152,9 +152,14 @@ expiring it would be a scheduled outage bought for nothing.
 
 The devnet is moving onto one Linode, where the relay, store, gas station,
 this gateway and the faucet all share one host behind one Caddy that owns 80
-and 443 (toon-protocol/infra#24, infra ADR 0001). Every node keeps its own
-connector, keys and hostnames — only its own TLS front goes away. For this
-box, that is `docker-compose.shared-edge.yml`, an **overlay**, turned on by
+and 443 (toon-protocol/infra#24, infra ADR 0001). This box's own TLS front
+goes away, and so does its own connector: the devnet runs **one** connector,
+the relay's, at **`https://toonprotocol.dev/ilp`**. It joins `edge-gateway`
+and routes the handover straight to `http://gateway-gw:8081/handover`, at the
+same price as before (the old `proxy.gateway.devnet` name is repointed at it
+by toon-protocol/infra). An operator running this bundle standalone is
+unaffected: `docker-compose.yml` and `connector.toml.template` still bring up
+this bundle's own connector. For this box, that is `docker-compose.shared-edge.yml`, an **overlay**, turned on by
 two lines in `.env` (never edit the overlay file itself):
 
 ```
@@ -166,17 +171,19 @@ COMPOSE_FILE=docker-compose.yml:docker-compose.shared-edge.yml
 unchanged**: a `.env` with no `COMPOSE_FILE` line runs `docker-compose.yml`
 alone, exactly as this bundle always has.
 
-The overlay disables `nginx` and `certbot` (`profiles: [disabled]` — nothing
-here ever sets `COMPOSE_PROFILES=disabled`, so they never start and bind no
-host port), gives every service a `mem_limit`, and joins `gateway` and
-`connector` to an external Docker network named `edge-gateway` — this node's
-own, created and owned by the host's edge (toon-protocol/infra#24), not by
-this bundle — under stable aliases:
+The overlay disables `nginx`, `certbot` and `connector` (`profiles: [disabled]`
+— nothing here ever sets `COMPOSE_PROFILES=disabled`, so they never start and
+bind no host port), gives every service a `mem_limit`, and joins `gateway` to
+an external Docker network named `edge-gateway` — this node's own, created
+and owned by the host's edge (toon-protocol/infra#24), not by this bundle —
+under a stable alias:
 
 | Alias | Container:port | What it serves | Scheme |
 |---|---|---|---|
-| `gateway-gw` | `gateway:8443` | `gw.devnet.toonprotocol.dev`, `*.gw.devnet.toonprotocol.dev` | HTTPS, self-signed (the internal certificate above) |
-| `gateway-proxy` | `connector:4000` | `proxy.gateway.devnet.toonprotocol.dev` | plain HTTP |
+| `gateway-gw` | `gateway:8443` | `gw.devnet.toonprotocol.dev`, `*.gw.devnet.toonprotocol.dev` (dialled by the edge) | HTTPS, self-signed (the internal certificate above) |
+| `gateway-gw` | `gateway:8081` | `/handover`, the door (dialled by the relay's one connector) | plain HTTP |
+
+The connector's `connector_state` volume is left in place, not deleted.
 
 This is exactly what this box's own `nginx` proxies to today
 (`nginx/node.conf.template`), so the host's edge has to replicate the same
@@ -192,10 +199,9 @@ silently:
   `proxy_ssl_server_name on`, `proxy_ssl_name $upstream`) — the peer is a
   long-lived self-signed certificate on a private network, with nothing to
   verify it against.
-* **`X-Forwarded-Proto: https`** on both upstreams. The gateway does not read
-  this header for its own proto decision (above), but the connector's
-  advertised endpoints and anything else downstream that does read forwarded
-  headers must keep seeing it.
+* **`X-Forwarded-Proto: https`** on `gateway-gw`. The gateway does not read
+  this header for its own proto decision (above), but anything downstream
+  that does read forwarded headers must keep seeing it.
 * **`Host` passed through unchanged** (`proxy_set_header Host $host;`). The
   gateway keys every workload off `Host`; rewriting it would make every
   workload see the edge's idea of its own name instead of the one the visitor
@@ -205,19 +211,16 @@ silently:
   `toon-gateway-reason: no_grant` — the healthy, empty state
   (`docs/devnet.md`) — and this is a plain response header, not anything
   hop-specific; the edge must not strip or rewrite it.
-* **WebSocket upgrades** (`Upgrade`, `Connection`) on both upstreams — a
-  workload is an arbitrary HTTP app.
+* **WebSocket upgrades** (`Upgrade`, `Connection`) — a workload is an
+  arbitrary HTTP app.
 * **Generous timeouts and body sizes** on `gateway-gw`: nginx's
   `proxy_read_timeout`/`proxy_send_timeout 1h` and
   `client_max_body_size 64m`, because a workload can be a long poll or an
-  upload. `gateway-proxy` (the sealed ILP edge) uses `proxy_read_timeout 1h`
-  and `client_max_body_size 1m` — the handover payload is small.
-* **`gateway-proxy` never gets a bare `Host` route.** It answers exactly the
-  one name (`proxy.gateway.devnet.toonprotocol.dev`, `EDGE_HOST`); `location
-  ^~ /admin { return 404; }` is nginx's own belt-and-braces, worth keeping on
-  the edge too.
+  upload. (The sealed ILP edge is no longer on this box under the overlay:
+  it is the relay's one connector.)
 
-**Resolved: only the edge shares a network with this gateway.** Joining
+**Resolved: only the edge, and the relay's one connector, share a network
+with this gateway.** Joining
 `gateway` to a network every other node's containers also sat on would have
 made *every* port it listens on reachable to any of them — Docker gives no
 per-port ACL between containers sharing a bridge network, and `expose:` in
@@ -230,27 +233,20 @@ without paying its connector a packet. So there is no flat `edge` network —
 (toon-protocol/infra#24) same as the other four nodes each get their own
 (`edge-relay`, `edge-store`, `edge-gas`, `edge-faucet`); the edge's Caddy
 joins all five, but no node's containers ever sit on another node's network.
+The one exception is deliberate: the relay's connector joins `edge-gateway`
+to reach the door at `gateway-gw:8081` — it *is* this box's connector now, so
+the door stays reachable only through a paid packet.
 
-**`connector`'s loopback publish moves to `127.0.0.1:4001:4000`** under the
-overlay (`ports: !override` in `docker-compose.shared-edge.yml`). Without the
-overlay it is still `127.0.0.1:4000:4000`, unchanged. This node's own
-docker-compose.yml publishes 4000 like every other bundle's does, and once
-several nodes share one host those collide — a real outage
-(toon-protocol/infra#25). The container port stays 4000 (the healthcheck
-inside the container is untouched); only the host side moves, to this node's
-own assignment:
-
-| Node | Host loopback port |
-|---|---|
-| relay | `127.0.0.1:3000` |
-| gateway | `127.0.0.1:4001` |
-| gas-station | `127.0.0.1:4002` |
-| store | `127.0.0.1:4003` |
-
-`bootstrap.sh` and `auto-apply.sh` still read `GET /ilp/identity` and
-`GET /ilp` on the loopback locally, whether or not the overlay is on —
-`auto-apply.sh` reads whichever port is actually published (from whichever
-compose files `COMPOSE_FILE` names) rather than assuming 4000.
+**`auto-apply.sh` removes the old connector container.** `docker compose up
+-d` does *not* stop a container whose service a profile has just switched
+off (it is not an orphan, so not even `--remove-orphans` touches it). So
+`auto-apply.sh` asks `docker compose config --services` whether the stack
+still has a connector; when it does not, it stops and removes the old
+connector container (`rm -sf`, which keeps `connector_state`), skips the
+connector health wait, the `GET /ilp` activation check and the restart, and
+treats the gateway's own healthcheck as the whole verification. Without the
+overlay, the connector still publishes `127.0.0.1:4000:4000` and both checks
+run exactly as before.
 
 **No certificate work happens on this box under the overlay.** `render.sh`
 skips DNS_PROVIDER and its credentials entirely and renders neither
@@ -264,7 +260,8 @@ edge instead (toon-protocol/infra#24).
 `docker-compose.yml`'s `gateway` service is still built on the box while its
 pin is the `sha-0000000` placeholder (`pull-images.sh`, from `../Dockerfile`,
 build context `..`) — the overlay does not touch that; it only adds network
-membership and a memory limit to the same service.
+membership and a memory limit to the same service. `pull-images.sh` pulls
+only the services the stack enables, so the disabled connector is not pulled.
 
 The devnet host turned out to be a 1 GB Linode nanode (961 MB total, ~350 MB
 used by OS/Docker before any node starts), not the 2 GB host first assumed
@@ -272,7 +269,8 @@ when the overlay's `mem_limit`s were provisional. `gateway`'s and
 `connector`'s limits are now sized from real `docker stats` measurements
 taken 2026-09-25 (toon-protocol/infra#25 step 2): the gateway app idled at
 43 MB (limit 192m, ≈4× idle) and the connector idled at 7 MB (limit 64m,
-≈4× idle). `nginx` and `certbot` keep their original 32m limits unmeasured —
+≈4× idle; kept though the connector is disabled now). `nginx` and `certbot`
+keep their original 32m limits unmeasured —
 both stay disabled under this overlay, so nobody has measured them running.
 
 `bootstrap.sh` refuses, before `docker compose up -d`, if `SHARED_EDGE=1` and
@@ -568,8 +566,9 @@ directly would be a way to tell this gateway what to serve without paying its
 connector a packet — which is the one thing the connector exists to prevent.
 
 **The connector's edge is loopback-published.** `127.0.0.1:4000:4000`. nginx is
-what faces the internet. Under the shared-edge overlay this moves to
-`127.0.0.1:4001:4000` — see "Running behind the shared edge" above.
+what faces the internet. Under the shared-edge overlay this bundle runs no
+connector at all and publishes nothing — see "Running behind the shared edge"
+above.
 
 **`ports:` bypasses ufw.** Docker manages its own iptables rules ahead of
 ufw's, so a container published with `ports:` is reachable from the internet

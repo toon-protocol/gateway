@@ -4,8 +4,10 @@
 # =============================================================================
 # The devnet is moving onto one Linode: the relay, store, gas station,
 # workload gateway and faucet all share it behind one Caddy that owns 80 and
-# 443. Every node keeps its own connector, keys and hostnames — only its own
-# TLS front goes away. This file is what that costs this bundle:
+# 443. This box's own TLS front goes away, and so does its own connector: the
+# devnet runs ONE connector, the relay's, at https://toonprotocol.dev/ilp,
+# which routes to the gateway's door directly. This file is what that costs
+# this bundle:
 #
 #   nginx, certbot   DISABLED (`profiles: [disabled]` — nothing here ever sets
 #                    COMPOSE_PROFILES=disabled, so `docker compose up -d`
@@ -30,28 +32,29 @@
 #                    with nothing to verify it against) and SNI set to the
 #                    upstream name. deploy/README.md § "Running behind the
 #                    shared edge" has the exact nginx behaviour to replicate.
-#   connector        joins `edge-gateway` under the alias `gateway-proxy`, so
-#                    the edge reaches the sealed ILP door at
-#                    `gateway-proxy:4000` — plain HTTP, same as nginx's own
-#                    upstream today. Its loopback publish MOVES to
-#                    127.0.0.1:4001:4000 (`ports: !override`, below): every
-#                    node bundle's own docker-compose.yml publishes its
-#                    connector on 127.0.0.1:4000, and on a shared host those
-#                    collide — a real outage (toon-protocol/infra#25). The
-#                    container port stays 4000; only the host side moves, to
-#                    this node's own assignment. `!override` replaces the
-#                    whole `ports:` list rather than merging into it, so 4001
-#                    is the ONLY thing published once the overlay is on.
-#                    auto-apply.sh reads whichever port is actually
-#                    published (it never hardcodes 4000), so it still finds
-#                    the connector locally either way.
+#                    The relay's one connector joins `edge-gateway` too and
+#                    reaches the door at http://gateway-gw:8081/handover.
+#   connector        DISABLED too (`profiles: [disabled]`). The devnet's one
+#                    connector is the relay's, at https://toonprotocol.dev/ilp
+#                    (the old proxy.gateway.devnet name is repointed at it by
+#                    toon-protocol/infra); it routes the handover prefix
+#                    straight to http://gateway-gw:8081/handover, at the same
+#                    price as before. No edge alias and no loopback publish
+#                    any more — nothing runs to carry them. The
+#                    connector_state volume is left in place.
+#                    docker-compose.yml and connector.toml.template keep this
+#                    bundle's own connector for every operator who runs it
+#                    standalone. auto-apply.sh notices the connector is gone
+#                    from the stack, removes its old container (`up -d` alone
+#                    leaves a profile-disabled container running) and waits on
+#                    the gateway's healthcheck alone.
 #   mem_limit        added to every service. The devnet host turned out to be
 #                    a 1 GB Linode nanode (961 MB total, ~350 MB used by
 #                    OS/Docker before any node starts), not the 2 GB host
 #                    first assumed. `gateway` and `connector` are now sized
 #                    from real `docker stats` measurements taken 2026-09-25
 #                    (toon-protocol/infra#25 step 2) — see each service's own
-#                    comment below. `nginx` and `certbot` stay disabled and
+#                    comment below (the connector, disabled now, keeps its). `nginx` and `certbot` stay disabled and
 #                    keep their original small limits unmeasured: nobody has
 #                    re-measured a proxy that never runs under this overlay.
 #
@@ -64,7 +67,8 @@
 # and to this gateway's own handover door (8081) — Docker has no per-port ACL
 # between containers on the same bridge network, so "not published" was never
 # enough once the network was shared. Per-node networks mean only the edge
-# reaches a node; nothing here needs to trust its neighbours.
+# (and the relay's one connector, which joins each app's network to route to
+# it) reaches a node; nothing here needs to trust its neighbours.
 #
 # Turned on in .env, two lines together (render.sh refuses one without the
 # other, the same check the provider bundle's HIDDEN switch uses):
@@ -97,22 +101,15 @@ services:
     # measured idle 43 MB on 2026-09-25 (toon-protocol/infra#25 step 2); limit ≈4× idle
     mem_limit: 192m
 
+  # Disabled the same way as nginx/certbot below: the devnet's one connector
+  # is the relay's (https://toonprotocol.dev/ilp), reaching the door at
+  # http://gateway-gw:8081/handover over `edge-gateway`. Nothing depends on
+  # this service (in docker-compose.yml the connector depends on the
+  # gateway, not the other way round), so disabling it strands nothing.
   connector:
-    networks:
-      default: {}
-      edge-gateway:
-        aliases: [gateway-proxy]
+    profiles: [disabled]
     # measured idle 7 MB on 2026-09-25 (toon-protocol/infra#25 step 2); limit ≈4× idle
     mem_limit: 64m
-    # Shared host, one connector loopback port each (toon-protocol/infra#25):
-    # docker-compose.yml publishes every node's connector on 127.0.0.1:4000,
-    # which collided the day two nodes landed on the same box. `!override`
-    # (Compose >=2.24) replaces the whole `ports:` list rather than merging
-    # into it, so 4001 is this node's ONLY publish under the overlay. The
-    # container side stays 4000 — nothing inside the container, including its
-    # own healthcheck, changes.
-    ports: !override
-      - '127.0.0.1:4001:4000'
 
   nginx:
     profiles: [disabled]

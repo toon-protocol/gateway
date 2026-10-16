@@ -16,7 +16,10 @@
 #   * only a fast-forward is applied, never a merge or a reset, so a box can
 #     never end up on a tree nobody reviewed;
 #   * after `up -d` the gateway and the connector must both reach `healthy`, or
-#     this exits non-zero so `systemctl status` and the journal show it;
+#     this exits non-zero so `systemctl status` and the journal show it. (A
+#     stack whose connector is disabled -- the devnet's shared-edge overlay --
+#     has its old connector container removed and waits on the gateway
+#     alone; see below.);
 #   * a render or apply failure is retried, and reported, on every run until
 #     it is fixed -- never silently sat on with the box left on the new
 #     commit and the old config (TOON_Network#160; see `deploy/.applied`,
@@ -222,6 +225,38 @@ wait_healthy() {
 # the door behind it answers, and a newly-pulled gateway is the change most likely
 # to have gone wrong.
 wait_healthy gateway || exit 1
+
+# A stack with no connector in it. The devnet's shared-edge overlay disables
+# this node's connector (`profiles: [disabled]`): the devnet runs ONE
+# connector, the relay's at https://toonprotocol.dev/ilp, which reaches the
+# door over `edge-gateway` as `gateway-gw:8081/handover`. Two things follow.
+#
+#   * `up -d` does NOT stop a container whose service a profile has just
+#     switched off -- it is not an orphan, so not even --remove-orphans
+#     touches it, and `ps -q connector` keeps finding it. Left alone, the old
+#     connector would keep running (and keep passing the checks below)
+#     forever. `rm -sf` stops and removes it; its named volume
+#     (connector_state) is kept.
+#   * There is no connector to wait for, ask for its addresses or restart, so
+#     the gateway's health, checked just above, is the whole verification.
+#     (No nginx reload either: the same overlay disables nginx.)
+#
+# `config --services` lists only the services the active compose files and
+# profiles enable. A failure here is a failure, never read as "no connector".
+if ! SERVICES=$(docker compose "${COMPOSE[@]}" config --services); then
+  echo "FAILED: 'docker compose config --services' failed for ${REMOTE:0:7} (its message is above)." >&2
+  exit 1
+fi
+if ! printf '%s\n' "$SERVICES" | grep -qx connector; then
+  if [ -n "$CONNECTOR_BEFORE_UP" ]; then
+    echo "the connector is disabled in this stack; stopping and removing its container (connector_state is kept)"
+    docker compose "${COMPOSE[@]}" rm -sf connector
+  fi
+  printf '%s\n' "$REMOTE" > "$APPLIED_FILE"
+  echo "applied ${REMOTE:0:7}; no connector in this stack, gateway healthy."
+  exit 0
+fi
+
 wait_healthy connector || exit 1
 
 # Ask the RUNNING connector what it advertises (GET /ilp, unauthenticated, on
