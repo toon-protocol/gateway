@@ -153,6 +153,7 @@ if [ "\${1:-}" = compose ]; then
     "up -d") exit "\${STUB_UP_EXIT:-0}" ;;
     "ps -q "*) svc=\${rest#ps -q }; echo "cid-$svc"; exit 0 ;;
     "restart "*) exit "\${STUB_RESTART_EXIT:-0}" ;;
+    "rm -sf connector") exit 0 ;;
     "logs --tail 40 "*) exit 0 ;;
     "port connector 4000") echo "\${STUB_PORT:-}"; exit 0 ;;
     "exec -T nginx nginx -s reload") exit "\${STUB_NGINX_RELOAD_EXIT:-0}" ;;
@@ -318,6 +319,56 @@ describe('the connector port a box-local overlay remaps (connector#1337)', () =>
   });
 });
 
+// ── A stack whose connector is disabled (the devnet one-connector overlay) ──
+// docker-compose.shared-edge.yml sets the connector `profiles: [disabled]`:
+// the devnet runs one connector, the relay's, which reaches the door as
+// gateway-gw:8081. `up -d` does NOT stop a container whose service a profile
+// just switched off, and `ps -q connector` still finds it (the stub answers
+// cid-connector), so auto-apply.sh must take it down itself rather than keep
+// verifying it.
+describe('a stack whose connector is disabled (the devnet one-connector overlay)', () => {
+  const sharedEdgeEnv = {
+    ...ENV,
+    SHARED_EDGE: '1',
+    COMPOSE_FILE: 'docker-compose.yml:docker-compose.shared-edge.yml',
+  };
+
+  it('removes the still-running connector container, waits on the gateway, and records the apply', () => {
+    const origin = freshOrigin();
+    const box = cloneBox(origin.dir);
+    writeEnv(box, sharedEdgeEnv);
+
+    const result = autoApply(box, { STUB_SERVICES: 'gateway' });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.calls, /^compose config --services$/m);
+    assert.match(result.calls, /^compose rm -sf connector$/m, 'the old connector container is stopped and removed');
+    assert.match(result.calls, /^compose ps -q gateway$/m, 'it waits on the gateway');
+    assert.doesNotMatch(result.calls, /curl /, 'no GET /ilp: there is no connector to ask');
+    assert.doesNotMatch(result.calls, /restart connector/, 'never restarts a connector that is not there');
+    assert.doesNotMatch(result.calls, /pull --quiet .*connector/, 'never pulls the disabled connector');
+    assert.equal(applied(box), origin.sha);
+  });
+
+  it('fails the apply, and records nothing, when the gateway never turns healthy', () => {
+    const origin = freshOrigin();
+    const box = cloneBox(origin.dir);
+    writeEnv(box, sharedEdgeEnv);
+
+    // 40 polls of `sleep 3` would make this slow: stub sleep out for this run.
+    const sleepBin = tmp('gateway-stub-sleep-');
+    writeFileSync(join(sleepBin, 'sleep'), '#!/usr/bin/env bash\nexit 0\n');
+    chmodSync(join(sleepBin, 'sleep'), 0o755);
+    const result = autoApply(box, {
+      STUB_SERVICES: 'gateway',
+      STUB_HEALTH: 'unhealthy',
+      PATH: `${sleepBin}:${stubBin}:${process.env.PATH}`,
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stdout, /FAILED: gateway is 'unhealthy'/);
+    assert.equal(applied(box), null);
+  });
+});
+
 // ── COMPOSE_FILE (shared contract v2 point 3) ────────────────────────────────
 // auto-apply.sh never re-parses COMPOSE_FILE's own value -- only whether
 // .env sets it at all, read the same careful way TRACK_BRANCH is (a single
@@ -331,7 +382,7 @@ describe('the connector port a box-local overlay remaps (connector#1337)', () =>
 // compose read COMPOSE_FILE from .env, or fall to compose's own default).
 // Only auto-apply.sh's OWN calls -- up/ps/restart/logs/exec -- carry its
 // `${COMPOSE[@]}`, so only those prove point 3.
-const ownCall = (call) => /^compose (?:-f docker-compose\.yml )?(?:up -d|ps -q|restart |logs --tail 40 |exec -T nginx)/.test(call);
+const ownCall = (call) => /^compose (?:-f docker-compose\.yml )?(?:up -d|ps -q|restart |rm -sf |logs --tail 40 |exec -T nginx)/.test(call);
 
 describe('COMPOSE_FILE (shared contract v2 point 3)', () => {
   it('with no COMPOSE_FILE in .env: auto-apply.sh names -f docker-compose.yml itself', () => {

@@ -447,9 +447,13 @@ describe('the shared-edge overlay', () => {
     assert.match(sharedEdge, /COMPOSE_FILE=docker-compose\.yml:docker-compose\.shared-edge\.yml/);
   });
 
-  it('disables nginx and certbot, so neither runs and neither binds a host port', () => {
+  it('disables nginx, certbot and the connector, so none runs and none binds a host port', () => {
+    // The connector too: the devnet runs ONE connector, the relay's at
+    // https://toonprotocol.dev/ilp, which reaches the door as
+    // gateway-gw:8081 over edge-gateway. docker-compose.yml keeps this
+    // bundle's own connector for standalone operators.
     const blocks = sharedEdge.split(/\n(?=  \S)/);
-    for (const name of ['nginx', 'certbot']) {
+    for (const name of ['nginx', 'certbot', 'connector']) {
       const block = blocks.find((b) => b.startsWith(`  ${name}:`));
       assert.ok(block, `no ${name}: service in the overlay`);
       assert.match(block, /profiles:\s*\[disabled\]/, `${name} is not disabled`);
@@ -461,9 +465,11 @@ describe('the shared-edge overlay', () => {
     assert.match(gatewayBlock, /networks:\s*\n\s+default:\s*\{\}\s*\n\s+edge-gateway:\s*\n\s+aliases:\s*\[gateway-gw\]/);
   });
 
-  it('joins the connector to `edge-gateway` under gateway-proxy, the alias the shared edge dials for proxy.gateway.devnet', () => {
+  it('leaves the disabled connector no edge alias and no loopback publish', () => {
     const connectorBlock = sharedEdge.slice(sharedEdge.indexOf('\n  connector:'), sharedEdge.indexOf('\n  nginx:'));
-    assert.match(connectorBlock, /networks:\s*\n\s+default:\s*\{\}\s*\n\s+edge-gateway:\s*\n\s+aliases:\s*\[gateway-proxy\]/);
+    assert.doesNotMatch(connectorBlock, /^\s+networks:/m);
+    assert.doesNotMatch(connectorBlock, /^\s+ports:/m);
+    assert.doesNotMatch(sharedEdge, /gateway-proxy/);
   });
 
   it('declares `edge-gateway` as the external network the host edge owns, not one this bundle creates, and never joins the old flat `edge`', () => {
@@ -488,8 +494,8 @@ describe('the shared-edge overlay', () => {
   });
 
   it('gateway and connector carry a measured mem_limit comment, not the old provisional one', () => {
-    // These two are the only services this overlay actually runs, so they're
-    // the only ones anyone has measured `docker stats` against — the
+    // These two are the only services anyone has measured `docker stats`
+    // against (the connector before this overlay disabled it) — the
     // comment should say so and point back at the issue, without this test
     // hardcoding the exact MB figures (those belong to the file, not to a
     // second copy here that would drift from it).

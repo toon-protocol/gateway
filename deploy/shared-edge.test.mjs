@@ -71,20 +71,24 @@ function config(dir, args = []) {
 }
 
 describe('the shared-edge overlay, merged by docker compose itself', { skip }, () => {
-  it('with the overlay named: only gateway and connector run — no nginx, no certbot, no host port 80 or 443', () => {
+  it('with the overlay named: only the gateway runs — no nginx, no certbot, no connector, no host port 80 or 443', () => {
     const dir = bundle({
       SHARED_EDGE: '1',
       COMPOSE_FILE: 'docker-compose.yml:docker-compose.shared-edge.yml',
     });
     const services = config(dir, ['--services']);
     assert.equal(services.status, 0, services.stderr);
-    assert.deepEqual(services.stdout.trim().split('\n').sort(), ['connector', 'gateway']);
+    // No connector: the devnet runs ONE connector, the relay's at
+    // https://toonprotocol.dev/ilp, which reaches the door as
+    // gateway-gw:8081 over edge-gateway.
+    assert.deepEqual(services.stdout.trim().split('\n'), ['gateway']);
 
     const full = config(dir);
     assert.equal(full.status, 0, full.stderr);
     assert.doesNotMatch(full.stdout, /published: "80"|published: "443"/, 'a host port 80 or 443 is bound with the overlay on');
     assert.match(full.stdout, /aliases:\s*\n\s*- gateway-gw/, 'gateway is not aliased gateway-gw on `edge-gateway`');
-    assert.match(full.stdout, /aliases:\s*\n\s*- gateway-proxy/, 'connector is not aliased gateway-proxy on `edge-gateway`');
+    assert.doesNotMatch(full.stdout, /gateway-proxy/, 'the disabled connector must leave no gateway-proxy alias behind');
+    assert.doesNotMatch(full.stdout, /^  connector:/m, 'the connector must be absent from the merged config');
     assert.match(full.stdout, /edge-gateway:\s*\n\s*name: edge-gateway\s*\n\s*external: true/, '`edge-gateway` is not declared external');
     // Shared contract v2: this node's own network, never the old flat `edge`.
     assert.doesNotMatch(full.stdout, /\bedge:\s*\n\s*name: edge\s*\n/, 'the merge still names the old flat `edge` network');
@@ -94,27 +98,12 @@ describe('the shared-edge overlay, merged by docker compose itself', { skip }, (
     // Split at each line indented by EXACTLY two spaces (a top-level key) so
     // a service's own deeper-indented content doesn't cut the block short.
     const blocks = full.stdout.split(/\n(?=  \S)/);
-    for (const service of ['gateway', 'connector']) {
-      const block = blocks.find((b) => b.startsWith(`  ${service}:`));
-      assert.ok(block, `no ${service}: block in the merged config`);
-      assert.match(block, /mem_limit: "\d+"/, `${service} has no mem_limit once merged`);
-    }
-    // The connector moves off the shared 4000 to its own loopback port under
-    // the overlay (toon-protocol/infra#25 — every node bundle otherwise
-    // publishes 127.0.0.1:4000, which collides once several share a host).
-    // The container side stays 4000; only the published host port changes,
-    // and `!override` must leave this the ONLY port entry for the connector.
-    const connectorBlock = blocks.find((b) => b.startsWith('  connector:'));
-    const ports = [
-      ...connectorBlock.matchAll(
-        /- mode: ingress\s*\n\s*host_ip: ([^\n]+)\s*\n\s*target: (\d+)\s*\n\s*published: "(\d+)"/g,
-      ),
-    ];
-    assert.deepEqual(
-      ports.map((m) => [m[1], m[2], m[3]]),
-      [['127.0.0.1', '4000', '4001']],
-      'the connector must publish exactly 127.0.0.1:4001:4000, and nothing else, under the overlay',
-    );
+    const block = blocks.find((b) => b.startsWith('  gateway:'));
+    assert.ok(block, 'no gateway: block in the merged config');
+    assert.match(block, /mem_limit: "\d+"/, 'gateway has no mem_limit once merged');
+    // Nothing in the merged stack publishes a port at all: the gateway never
+    // did, and the connector (whose loopback publish was the one) is gone.
+    assert.doesNotMatch(full.stdout, /published:/, 'something publishes a host port with the overlay on');
   });
 
   it('with no COMPOSE_FILE line: the default is exactly what it always was — nginx and certbot run, 80 and 443 are bound', () => {

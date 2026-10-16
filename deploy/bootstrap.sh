@@ -138,9 +138,16 @@ systemctl enable --now toon-auto-apply-gateway.timer
 echo
 echo "Workload Gateway box up."
 echo "  workloads      : https://<label>.${GATEWAY_DOMAIN}/"
-echo "  ILP edge       : https://${EDGE_HOST}/ilp"
-echo "  sealing key    : https://${EDGE_HOST}/ilp/identity   (what a tenant seals a handover to)"
-echo "  handover route : ${ILP_ADDRESS}.handover"
+if [ "$SHARED_EDGE" = 1 ]; then
+  # docker-compose.shared-edge.yml disables this bundle's connector: the
+  # devnet's one connector is the relay's, which routes the handover to
+  # gateway-gw:8081 over edge-gateway.
+  echo "  ILP edge       : the relay's one connector, https://toonprotocol.dev/ilp"
+else
+  echo "  ILP edge       : https://${EDGE_HOST}/ilp"
+  echo "  sealing key    : https://${EDGE_HOST}/ilp/identity   (what a tenant seals a handover to)"
+  echo "  handover route : ${ILP_ADDRESS}.handover"
+fi
 echo
 echo "A hostname this gateway holds no grant for answers 503 with"
 echo "  toon-gateway-reason: no_grant — that is the healthy, empty state."

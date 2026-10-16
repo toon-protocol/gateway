@@ -10,8 +10,9 @@
 #
 # ── This box's own edge, or the devnet host's shared one ────────────────────
 # SHARED_EDGE=1 in .env (toon-protocol/gateway#18, infra#24, infra ADR 0001)
-# means docker-compose.shared-edge.yml has disabled nginx and certbot and
-# joined the gateway and connector to the host's `edge` network instead: no
+# means docker-compose.shared-edge.yml has disabled nginx, certbot and the
+# connector (the devnet runs the relay's one connector) and joined the gateway
+# to the host's `edge-gateway` network instead: no
 # certificate is issued here, so neither dns-01.env nor nginx/conf.d/node.conf
 # is rendered, and DNS_PROVIDER is not required. Without it, this box fronts
 # itself exactly as before.
