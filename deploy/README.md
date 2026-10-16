@@ -53,16 +53,16 @@ never be handed. The ILP edge therefore sits **beside** the domain, not inside
 it, and `render.sh` refuses a configuration where it does not:
 
 ```
-GATEWAY_DOMAIN=gw.devnet.toonprotocol.dev          # *.<this> is every workload
-EDGE_HOST=proxy.gateway.devnet.toonprotocol.dev    # where a handover is paid for
+GATEWAY_DOMAIN=gw.example.com              # *.<this> is every workload
+EDGE_HOST=proxy.gateway.example.com        # where a handover is paid for
 ```
 
 Three A-records, all pointing at the box:
 
 ```
-gw.devnet.toonprotocol.dev          A  <box ip>
-*.gw.devnet.toonprotocol.dev        A  <box ip>
-proxy.gateway.devnet.toonprotocol.dev  A  <box ip>
+gw.example.com               A  <box ip>
+*.gw.example.com             A  <box ip>
+proxy.gateway.example.com    A  <box ip>
 ```
 
 ## DNS-01, alone in the fleet
