@@ -536,10 +536,15 @@ before the build that requires it.** Here the pin and the config it was
 validated against are the same commit and the box takes both with one
 fast-forward, so a build can never reach this box ahead of the config it needs.
 
-The current pin is `rust-2026.09.29.1`, the build the rest of the devnet fleet
-(relay, store, gas-station) runs. Over `rust-2026.09.28.1` it publishes the EVM
+The current pin is `rust-2026.10.23.1`, the newest connector release, which
+the relay's bundle also pins. It asks nothing new of this bundle's config: the
+template renders unchanged and the build accepts it, stopping where
+`rust-2026.09.29.1` did, at binding a settlement key a CI runner holds no funds
+for.
+
+`rust-2026.09.29.1`, the pin before it, was the first build to publish the EVM
 deposit method and this node's facilitator in its batch-settlement terms
-(connector#1419), and checks `asset_transfer_method` and the asset's EIP-712
+(connector#1419), and to check `asset_transfer_method` and the asset's EIP-712
 domain against the token at boot (connector#1425). Both come from `.env`:
 `SETTLEMENT_EVM_ASSET_TRANSFER_METHOD` (required) and
 `SETTLEMENT_EVM_FACILITATOR_URL` (empty names none). The devnet box names the
